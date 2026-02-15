@@ -1,0 +1,12 @@
+[Unit]
+Description=OpenTorque PBS MOM
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/pbs_mom -D
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

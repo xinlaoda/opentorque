@@ -1,0 +1,13 @@
+OpenTorque
+
+This project is inspired by TORQUE Resource Manager, which was developed by
+Adaptive Computing Enterprises, Inc. as a fork of OpenPBS v2.3. OpenPBS was
+originally developed by NASA Ames Research Center, Lawrence Livermore National
+Laboratory, and Veridian Information Solutions, Inc.
+
+OpenTorque is a clean-room reimplementation in Go. It does not contain any
+code from TORQUE or OpenPBS, but implements compatible protocols and interfaces
+to serve as a modern, cross-platform replacement.
+
+TORQUE is a trademark of Adaptive Computing Enterprises, Inc.
+OpenPBS is a trademark of Veridian Information Solutions, Inc.

@@ -1,0 +1,26 @@
+# Binaries
+/bin/
+*.exe
+
+# Build output
+/build/
+
+# Go
+*.test
+*.out
+coverage.html
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary
+/tmp/
+*.log

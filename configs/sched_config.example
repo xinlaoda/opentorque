@@ -1,0 +1,40 @@
+# OpenTorque Scheduler Configuration
+#
+# This file controls both built-in and external scheduler behavior.
+# Location: $PBS_HOME/sched_priv/sched_config
+
+# scheduler_mode: builtin | external
+#   builtin  - Server's built-in FIFO scheduler (high throughput, low overhead)
+#   external - External pbs_sched process (advanced algorithms)
+scheduler_mode: builtin
+
+# scheduler_interval: seconds between scheduling cycles (external mode only)
+scheduler_interval: 10
+
+# --- Job Iteration Strategy ---
+# round_robin: cycle through queues, one job per queue per pass
+round_robin: false  ALL
+
+# by_queue: process queues in priority order
+by_queue: true      ALL
+
+# strict_fifo: stop at first unrunnable job per queue
+strict_fifo: false  ALL
+
+# --- Sorting ---
+# Options: fifo, shortest_job_first, longest_job_first,
+#          high_priority_first, low_priority_first,
+#          smallest_memory_first, largest_memory_first, fair_share
+sort_by: shortest_job_first  ALL
+
+# --- Fair Share ---
+fair_share: false   ALL
+half_life: 24:00:00
+
+# --- Starvation Prevention ---
+help_starving_jobs: true  ALL
+max_starve: 24:00:00
+
+# --- Node Selection ---
+# load_balancing: spread jobs across nodes (true) or pack onto fewest (false)
+load_balancing: false  ALL
