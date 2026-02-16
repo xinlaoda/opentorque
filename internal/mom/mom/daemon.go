@@ -40,7 +40,7 @@ type Daemon struct {
 // New creates a new MOM daemon.
 func New(cfg *config.Config) *Daemon {
 	mon := resource.NewMonitor()
-	executor := job.NewExecutor(cfg.PBSHome, cfg.PathSpool, cfg.PathJobs)
+	executor := job.NewExecutor(cfg)
 	jobMgr := job.NewManager()
 
 	d := &Daemon{
@@ -69,6 +69,7 @@ func (d *Daemon) Run() error {
 	log.Printf("[MOM] PBS Home: %s", d.cfg.PBSHome)
 	log.Printf("[MOM] Servers: %v", d.cfg.PBSServers)
 	log.Printf("[MOM] MOM port: %d, RM port: %d", d.cfg.MomPort, d.cfg.RMPort)
+	d.logNonDefaultConfig()
 
 	// Ensure directories exist
 	if err := d.cfg.EnsureDirs(); err != nil {
@@ -322,6 +323,7 @@ func (d *Daemon) connectToServers() {
 
 // sendStatusUpdates sends status to all connected servers.
 func (d *Daemon) sendStatusUpdates() {
+	log.Printf("[MOM] Sending IS heartbeat/status update to %d servers", len(d.servers))
 	for _, srv := range d.servers {
 		if srv.IsConnected() {
 			if err := srv.SendStatusUpdate(); err != nil {
@@ -464,6 +466,74 @@ func (d *Daemon) writePIDFile() error {
 
 func (d *Daemon) pidFilePath() string {
 	return d.cfg.PathMomPriv + "/mom.lock"
+}
+
+// logNonDefaultConfig logs configuration values that differ from defaults.
+func (d *Daemon) logNonDefaultConfig() {
+	c := d.cfg
+	if c.MomHost != "" {
+		log.Printf("[MOM] Config: mom_host=%s", c.MomHost)
+	}
+	if c.LogEvents != config.DefaultLogEvents {
+		log.Printf("[MOM] Config: logevent=0x%x", c.LogEvents)
+	}
+	if c.CheckPollTime != config.DefaultCheckPoll {
+		log.Printf("[MOM] Config: check_poll_time=%d", c.CheckPollTime)
+	}
+	if c.StatusUpdateTime != config.DefaultStatusUpdate {
+		log.Printf("[MOM] Config: status_update_time=%d", c.StatusUpdateTime)
+	}
+	if c.PrologAlarm != config.DefaultPrologAlarm {
+		log.Printf("[MOM] Config: prologalarm=%d", c.PrologAlarm)
+	}
+	if c.EnableMomRestart {
+		log.Printf("[MOM] Config: enablemomrestart=true")
+	}
+	if c.DownOnError {
+		log.Printf("[MOM] Config: down_on_error=true")
+	}
+	if len(c.UseCp) > 0 {
+		log.Printf("[MOM] Config: usecp entries=%d", len(c.UseCp))
+	}
+	if c.Timeout != 300 {
+		log.Printf("[MOM] Config: timeout=%d", c.Timeout)
+	}
+	if len(c.Restricted) > 0 {
+		log.Printf("[MOM] Config: restricted=%v", c.Restricted)
+	}
+	if len(c.PBSClient) > 0 {
+		log.Printf("[MOM] Config: pbsclient=%v", c.PBSClient)
+	}
+	if c.IdealLoad >= 0 {
+		log.Printf("[MOM] Config: ideal_load=%.2f", c.IdealLoad)
+	}
+	if c.MaxLoad >= 0 {
+		log.Printf("[MOM] Config: max_load=%.2f", c.MaxLoad)
+	}
+	if c.TmpDir != "" {
+		log.Printf("[MOM] Config: tmpdir=%s", c.TmpDir)
+	}
+	if c.LogDirectory != "" {
+		log.Printf("[MOM] Config: log_directory=%s", c.LogDirectory)
+	}
+	if c.LogLevel != 0 {
+		log.Printf("[MOM] Config: loglevel=%d", c.LogLevel)
+	}
+	if c.NodeCheckScript != "" {
+		log.Printf("[MOM] Config: node_check_script=%s", c.NodeCheckScript)
+	}
+	if c.JobStarter != "" {
+		log.Printf("[MOM] Config: job_starter=%s", c.JobStarter)
+	}
+	if !c.SourceLoginBatch {
+		log.Printf("[MOM] Config: source_login_batch=false")
+	}
+	if !c.SourceLoginInteractive {
+		log.Printf("[MOM] Config: source_login_interactive=false")
+	}
+	if c.JobOutputFileUmask != 0077 {
+		log.Printf("[MOM] Config: job_output_file_umask=0%o", c.JobOutputFileUmask)
+	}
 }
 
 // --- Request Handlers ---

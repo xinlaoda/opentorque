@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/xinlaoda/opentorque/internal/mom/config"
 )
 
 // Executor handles starting and monitoring job processes.
@@ -17,14 +19,16 @@ type Executor struct {
 	pbsHome    string
 	spoolDir   string
 	jobsDir    string
+	cfg        *config.Config
 }
 
 // NewExecutor creates a job executor.
-func NewExecutor(pbsHome, spoolDir, jobsDir string) *Executor {
+func NewExecutor(cfg *config.Config) *Executor {
 	return &Executor{
-		pbsHome:  pbsHome,
-		spoolDir: spoolDir,
-		jobsDir:  jobsDir,
+		pbsHome:  cfg.PBSHome,
+		spoolDir: cfg.PathSpool,
+		jobsDir:  cfg.PathJobs,
+		cfg:      cfg,
 	}
 }
 
@@ -36,6 +40,7 @@ func (e *Executor) StartJob(j *Job) error {
 	// Write job script to disk
 	scriptPath := filepath.Join(e.jobsDir, j.ID+".SC")
 	if j.Script != "" {
+		log.Printf("[EXEC] Writing job script for %s to %s", j.ID, scriptPath)
 		if err := os.WriteFile(scriptPath, []byte(j.Script), 0700); err != nil {
 			return fmt.Errorf("write script: %w", err)
 		}
@@ -62,23 +67,31 @@ func (e *Executor) StartJob(j *Job) error {
 	}
 
 	// Build environment
+	log.Printf("[EXEC] Setting up environment for job %s", j.ID)
 	env := e.buildEnvironment(j)
 
-	// Create output files
-	stdout, err := os.Create(j.StdoutPath)
+	// Create output files with configured umask
+	umask := os.FileMode(0644)
+	if e.cfg != nil && e.cfg.JobOutputFileUmask != 0 {
+		umask = 0666 &^ os.FileMode(e.cfg.JobOutputFileUmask)
+	}
+	stdout, err := os.OpenFile(j.StdoutPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, umask)
 	if err != nil {
 		return fmt.Errorf("create stdout: %w", err)
 	}
-	stderr, err := os.Create(j.StderrPath)
+	stderr, err := os.OpenFile(j.StderrPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, umask)
 	if err != nil {
 		stdout.Close()
 		return fmt.Errorf("create stderr: %w", err)
 	}
 
-	// Build command
+	// Optionally wrap script to source /etc/profile for batch jobs
 	var cmd *exec.Cmd
+	sourceLogin := e.cfg != nil && e.cfg.SourceLoginBatch
 	if runtime.GOOS == "windows" {
 		cmd = exec.Command(shell, "/c", j.ScriptFile)
+	} else if sourceLogin {
+		cmd = exec.Command(shell, "-c", ". /etc/profile 2>/dev/null; exec "+shell+" "+j.ScriptFile)
 	} else {
 		cmd = exec.Command(shell, j.ScriptFile)
 	}
@@ -212,6 +225,11 @@ func (e *Executor) buildEnvironment(j *Job) []string {
 		"PBS_O_QUEUE":    j.Queue,
 	}
 
+	// Set TMPDIR from config if configured
+	if e.cfg != nil && e.cfg.TmpDir != "" {
+		pbsVars["TMPDIR"] = e.cfg.TmpDir
+	}
+
 	if j.ExecHost != "" {
 		pbsVars["PBS_NODELIST"] = j.ExecHost
 	}
@@ -266,6 +284,8 @@ func (e *Executor) DeliverOutput(j *Job) {
 	finalOut := j.FinalStdout
 	finalErr := j.FinalStderr
 	j.Mu.RUnlock()
+
+	log.Printf("[EXEC] Delivering output for job %s: stdout=%s stderr=%s", j.ID, finalOut, finalErr)
 
 	if finalOut != "" && stdout != finalOut {
 		if err := copyFile(stdout, finalOut); err != nil {

@@ -68,8 +68,26 @@ func main() {
 		if err := cfg.Load(cfgPath); err != nil {
 			log.Fatalf("Failed to load config: %v", err)
 		}
+		log.Printf("Config file %s loaded successfully", cfgPath)
 	} else {
 		log.Printf("No config file found at %s, using defaults", cfgPath)
+	}
+
+	// Apply config-driven log directory override (re-open log if needed)
+	if cfg.LogDirectory != "" && *logFile == "" {
+		logDir := cfg.LogDirectory
+		os.MkdirAll(logDir, 0755)
+		logPath := filepath.Join(logDir, "mom_go.log")
+		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err == nil {
+			log.SetOutput(f)
+			log.Printf("Log redirected to %s (from $log_directory config)", logPath)
+		}
+	}
+
+	// Apply log level from config
+	if cfg.LogLevel > 0 {
+		log.Printf("Log level set to %d", cfg.LogLevel)
 	}
 
 	// Load server name if no servers configured
