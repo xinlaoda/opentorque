@@ -56,7 +56,11 @@ make all 2>&1 | tail -1
 echo "[2/4] Preparing package staging..."
 rm -rf "$BUILD_DIR"
 
-for pkg in server client cli; do
+# Generate a shared auth_key at build time so all packages contain the same key
+AUTH_KEY_HEX=$(openssl rand -hex 32)
+echo "  Auth key generated (embedded in all packages)"
+
+for pkg in server compute cli; do
   PKG_NAME="opentorque-${pkg}"
   STAGE="$BUILD_DIR/$PKG_NAME"
 
@@ -66,6 +70,10 @@ for pkg in server client cli; do
   mkdir -p "$STAGE/var/spool/torque/server_priv/jobs"
   mkdir -p "$STAGE/var/spool/torque/server_logs"
   mkdir -p "$STAGE/var/spool/torque/spool"
+
+  # Embed the shared auth_key in every package
+  echo "$AUTH_KEY_HEX" > "$STAGE/var/spool/torque/auth_key"
+  chmod 644 "$STAGE/var/spool/torque/auth_key"
 
   case "$pkg" in
     server)
@@ -84,7 +92,7 @@ for pkg in server client cli; do
       mkdir -p "$STAGE/var/spool/torque/sched_priv"
       mkdir -p "$STAGE/var/spool/torque/sched_logs"
       ;;
-    client)
+    compute)
       # MOM daemon + utilities
       for b in $CLIENT_BINS; do
         cp "$BIN_DIR/$b" "$STAGE/usr/local/sbin/"
@@ -126,6 +134,7 @@ Section: admin
 Priority: optional
 Architecture: $DEB_ARCH
 Depends: $deps
+Replaces: opentorque-server, opentorque-compute, opentorque-cli
 Maintainer: OpenTorque Project <opentorque@example.com>
 Homepage: https://github.com/xinlaoda/opentorque
 Description: $desc
@@ -149,15 +158,10 @@ POSTINST
     server)
       cat >> "$STAGE/DEBIAN/postinst" <<'POSTINST'
 
-# Generate auth_key if it doesn't exist
+# Auth key is pre-generated and included in the package.
+# Ensure correct permissions.
 AUTH_KEY="$PBS_HOME/auth_key"
-if [ ! -f "$AUTH_KEY" ]; then
-  echo "Generating authentication key..."
-  openssl rand -hex 32 > "$AUTH_KEY"
-  chmod 644 "$AUTH_KEY"
-  echo "Auth key created at $AUTH_KEY"
-  echo "IMPORTANT: Copy this file to all compute nodes and CLI hosts."
-fi
+chmod 644 "$AUTH_KEY" 2>/dev/null || true
 
 # Set server_name
 HOSTNAME=$(hostname -s)
@@ -183,10 +187,10 @@ echo ""
 echo "=== OpenTorque Server installed ==="
 echo "  Initialize:  sudo pbs_server -t create"
 echo "  Start:       sudo systemctl start pbs_server pbs_sched"
-echo "  Auth key:    $AUTH_KEY (distribute to all nodes)"
+echo "  Auth key:    $AUTH_KEY (pre-installed, same key in all packages)"
 POSTINST
       ;;
-    client)
+    compute)
       cat >> "$STAGE/DEBIAN/postinst" <<'POSTINST'
 
 # Create MOM config if missing
@@ -198,20 +202,15 @@ if [ ! -f "$MOM_CONF" ]; then
   echo "NOTE: Edit $MOM_CONF to set the correct server hostname."
 fi
 
-# Check for auth_key
-AUTH_KEY="$PBS_HOME/auth_key"
-if [ ! -f "$AUTH_KEY" ]; then
-  echo ""
-  echo "WARNING: No auth_key found at $AUTH_KEY"
-  echo "  Copy the auth_key from the server node before starting pbs_mom."
-fi
+# Auth key is pre-installed from the package
+chmod 644 "$PBS_HOME/auth_key" 2>/dev/null || true
 
 # Reload systemd
 systemctl daemon-reload 2>/dev/null || true
 echo ""
-echo "=== OpenTorque Client (MOM) installed ==="
+echo "=== OpenTorque Compute (MOM) installed ==="
 echo "  Configure: Edit $PBS_HOME/mom_priv/config"
-echo "  Auth key:  Copy from server to $AUTH_KEY"
+echo "  Auth key:  Pre-installed at $PBS_HOME/auth_key"
 echo "  Start:     sudo systemctl start pbs_mom"
 POSTINST
       ;;
@@ -224,18 +223,13 @@ if [ ! -f "$PBS_HOME/server_name" ]; then
   echo "NOTE: Edit $PBS_HOME/server_name to point to your PBS server."
 fi
 
-# Check for auth_key
-AUTH_KEY="$PBS_HOME/auth_key"
-if [ ! -f "$AUTH_KEY" ]; then
-  echo ""
-  echo "WARNING: No auth_key found at $AUTH_KEY"
-  echo "  Copy the auth_key from the server node to use CLI tools."
-fi
+# Auth key is pre-installed from the package
+chmod 644 "$PBS_HOME/auth_key" 2>/dev/null || true
 
 echo ""
 echo "=== OpenTorque CLI tools installed ==="
 echo "  Configure: Set server in $PBS_HOME/server_name"
-echo "  Auth key:  Copy from server to $AUTH_KEY"
+echo "  Auth key:  Pre-installed at $PBS_HOME/auth_key"
 POSTINST
       ;;
   esac
@@ -255,7 +249,7 @@ systemctl stop pbs_server pbs_sched 2>/dev/null || true
 systemctl disable pbs_server pbs_sched 2>/dev/null || true
 PRERM
       ;;
-    client)
+    compute)
       cat >> "$STAGE/DEBIAN/prerm" <<'PRERM'
 systemctl stop pbs_mom 2>/dev/null || true
 systemctl disable pbs_mom 2>/dev/null || true
@@ -320,6 +314,7 @@ EOF
 /lib/systemd/system/pbs_server.service
 /lib/systemd/system/pbs_sched.service
 /etc/opentorque/sched_config.example
+%config(noreplace) /var/spool/torque/auth_key
 %dir /var/spool/torque
 %dir /var/spool/torque/server_priv
 %dir /var/spool/torque/server_priv/jobs
@@ -331,11 +326,7 @@ EOF
 
 %post
 PBS_HOME="/var/spool/torque"
-AUTH_KEY="$PBS_HOME/auth_key"
-if [ ! -f "$AUTH_KEY" ]; then
-  openssl rand -hex 32 > "$AUTH_KEY"
-  chmod 644 "$AUTH_KEY"
-fi
+chmod 644 "$PBS_HOME/auth_key" 2>/dev/null || true
 echo "$(hostname -s)" > "$PBS_HOME/server_name"
 if [ ! -f "$PBS_HOME/server_priv/nodes" ]; then
   rm -rf "$PBS_HOME/server_priv/nodes" 2>/dev/null || true
@@ -351,13 +342,14 @@ systemctl daemon-reload 2>/dev/null || true
 systemctl stop pbs_server pbs_sched 2>/dev/null || true
 EOF
       ;;
-    client)
+    compute)
       cat >> "$RPM_TOP/SPECS/${PKG_NAME}.spec" <<'EOF'
 /usr/local/sbin/pbs_mom
 /usr/local/sbin/momctl
 /usr/local/sbin/pbs_track
 /usr/local/sbin/pbs_pam_check
 /lib/systemd/system/pbs_mom.service
+%config(noreplace) /var/spool/torque/auth_key
 %dir /var/spool/torque
 %dir /var/spool/torque/mom_priv
 %dir /var/spool/torque/mom_priv/jobs
@@ -385,6 +377,7 @@ EOF
         echo "/usr/local/bin/$b" >> "$RPM_TOP/SPECS/${PKG_NAME}.spec"
       done
       cat >> "$RPM_TOP/SPECS/${PKG_NAME}.spec" <<'EOF'
+%config(noreplace) /var/spool/torque/auth_key
 %dir /var/spool/torque
 
 %post
@@ -403,28 +396,28 @@ EOF
 case "$PKG_FORMAT" in
   deb)
     build_deb "server" "OpenTorque server and scheduler daemons" ""
-    build_deb "client" "OpenTorque compute node (MOM) daemon" ""
+    build_deb "compute" "OpenTorque compute node (MOM) daemon" ""
     build_deb "cli"    "OpenTorque CLI tools for job management" ""
     ;;
   rpm)
     build_rpm "server" "OpenTorque server and scheduler daemons" ""
-    build_rpm "client" "OpenTorque compute node (MOM) daemon" ""
+    build_rpm "compute" "OpenTorque compute node (MOM) daemon" ""
     build_rpm "cli"    "OpenTorque CLI tools for job management" ""
     ;;
   suse)
     # SUSE uses RPM but with zypper; same spec works
     build_rpm "server" "OpenTorque server and scheduler daemons" ""
-    build_rpm "client" "OpenTorque compute node (MOM) daemon" ""
+    build_rpm "compute" "OpenTorque compute node (MOM) daemon" ""
     build_rpm "cli"    "OpenTorque CLI tools for job management" ""
     ;;
   all)
     echo "--- Building DEB packages ---"
     build_deb "server" "OpenTorque server and scheduler daemons" ""
-    build_deb "client" "OpenTorque compute node (MOM) daemon" ""
+    build_deb "compute" "OpenTorque compute node (MOM) daemon" ""
     build_deb "cli"    "OpenTorque CLI tools for job management" ""
     echo "--- Building RPM packages ---"
     build_rpm "server" "OpenTorque server and scheduler daemons" ""
-    build_rpm "client" "OpenTorque compute node (MOM) daemon" ""
+    build_rpm "compute" "OpenTorque compute node (MOM) daemon" ""
     build_rpm "cli"    "OpenTorque CLI tools for job management" ""
     ;;
   *)

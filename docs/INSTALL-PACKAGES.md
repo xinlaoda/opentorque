@@ -9,7 +9,7 @@ OpenTorque is split into three packages:
 | Package | Contents | Install On |
 |---------|----------|------------|
 | **opentorque-server** | `pbs_server`, `pbs_sched`, systemd units, scheduler config | Head node |
-| **opentorque-client** | `pbs_mom`, `momctl`, `pbs_track`, systemd unit | Compute nodes |
+| **opentorque-compute** | `pbs_mom`, `momctl`, `pbs_track`, systemd unit | Compute nodes |
 | **opentorque-cli** | All CLI tools (`qsub`, `qstat`, `qdel`, etc.) | All nodes / submit hosts |
 
 ## Prerequisites
@@ -18,7 +18,7 @@ OpenTorque is split into three packages:
 - **Architecture**: amd64 (x86_64) or arm64 (aarch64)
 - **Root access**: Required for package installation
 - **Network**: All nodes must be able to reach the head node on **port 15001** (server) and compute nodes on **port 15002** (MOM)
-- **openssl**: Required on the server node (for auth key generation)
+- **openssl**: Required at build time (for auth key generation)
 - **Hostname resolution**: All nodes must resolve each other's hostnames
 
 ## Building Packages
@@ -61,9 +61,11 @@ sudo zypper install opentorque-server-0.1.0-1.x86_64.rpm
 ```
 
 The server postinstall script automatically:
-- Generates `/var/spool/torque/auth_key` (HMAC-SHA256 shared secret)
 - Sets `/var/spool/torque/server_name` to the current hostname
 - Copies default scheduler config to `/var/spool/torque/sched_priv/sched_config`
+
+> **Note:** The `auth_key` is generated at build time and embedded in all three packages.
+> No manual key distribution is needed when all packages are built together.
 
 ### Step 2: Initialize the Server (First Time Only)
 
@@ -95,31 +97,31 @@ qmgr -c "set server default_queue = batch"
 **Scheduler configuration** (optional):
 Edit `/var/spool/torque/sched_priv/sched_config` to customize scheduling behavior.
 
-### Step 4: Distribute Auth Key
+### Step 4: Auth Key (Already Distributed)
 
-Copy the authentication key from the server to **every compute node and submit host**:
+When packages are built together using `build-packages.sh`, all three packages contain the **same auth_key**. No manual copying is needed.
 
+If you rebuild packages separately or need to rotate the key:
 ```bash
-# From the head node
+# Generate a new key on the server
+openssl rand -hex 32 > /var/spool/torque/auth_key
+chmod 644 /var/spool/torque/auth_key
+
+# Copy to compute nodes and CLI hosts
 scp /var/spool/torque/auth_key compute01:/var/spool/torque/auth_key
 scp /var/spool/torque/auth_key compute02:/var/spool/torque/auth_key
 ```
 
-The auth key must be readable by all users who submit jobs:
-```bash
-chmod 644 /var/spool/torque/auth_key
-```
-
-### Step 5: Install Client Package (Compute Nodes)
+### Step 5: Install Compute Package (Compute Nodes)
 
 On each compute node:
 
 ```bash
 # Ubuntu/Debian
-sudo dpkg -i opentorque-client_0.1.0-1_amd64.deb
+sudo dpkg -i opentorque-compute_0.1.0-1_amd64.deb
 
 # RHEL/CentOS
-sudo rpm -ivh opentorque-client-0.1.0-1.x86_64.rpm
+sudo rpm -ivh opentorque-compute-0.1.0-1.x86_64.rpm
 ```
 
 **Configure MOM** to point to the server:
@@ -144,8 +146,6 @@ sudo rpm -ivh opentorque-cli-0.1.0-1.x86_64.rpm
 ```bash
 echo 'headnode' > /var/spool/torque/server_name
 ```
-
-**Copy auth key** from server (see Step 4).
 
 ### Step 7: Start Services
 
@@ -185,7 +185,7 @@ cat ~/test-job.o*
 
 ```
 /var/spool/torque/
-├── auth_key                    # Shared authentication key
+├── auth_key                    # Shared authentication key (built into all packages)
 ├── server_name                 # PBS server hostname
 ├── server_priv/                # Server private data
 │   ├── nodes                   # Registered compute nodes
@@ -228,10 +228,10 @@ sudo firewall-cmd --reload
 
 ```bash
 # Ubuntu/Debian
-sudo dpkg -r opentorque-server opentorque-client opentorque-cli
+sudo dpkg -r opentorque-server opentorque-compute opentorque-cli
 
 # RHEL/CentOS
-sudo rpm -e opentorque-server opentorque-client opentorque-cli
+sudo rpm -e opentorque-server opentorque-compute opentorque-cli
 ```
 
 The removal scripts automatically stop services. Configuration files in `/var/spool/torque/` are **preserved** across removal for data safety.
