@@ -29,8 +29,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/opentorque/opentorque/internal/cli/client"
-	"github.com/opentorque/opentorque/internal/cli/dis"
+	"github.com/xinlaoda/opentorque/internal/cli/client"
+	"github.com/xinlaoda/opentorque/internal/cli/dis"
 )
 
 // DRMAA error codes per the OGF specification.

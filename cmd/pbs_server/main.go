@@ -9,7 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/opentorque/opentorque/internal/server"
+	"github.com/xinlaoda/opentorque/internal/server"
 )
 
 var version = "dev"

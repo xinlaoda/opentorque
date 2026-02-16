@@ -16,7 +16,7 @@ import (
 	"os"
 	"os/user"
 
-	"github.com/opentorque/opentorque/internal/pam"
+	"github.com/xinlaoda/opentorque/internal/pam"
 )
 
 func main() {

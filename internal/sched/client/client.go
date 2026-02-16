@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/opentorque/opentorque/internal/sched/dis"
+	"github.com/xinlaoda/opentorque/internal/sched/dis"
 )
 
 const (

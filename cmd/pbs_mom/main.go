@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/opentorque/opentorque/internal/mom/config"
-	"github.com/opentorque/opentorque/internal/mom/mom"
+	"github.com/xinlaoda/opentorque/internal/mom/config"
+	"github.com/xinlaoda/opentorque/internal/mom/mom"
 )
 
 const version = "7.0.0-go"

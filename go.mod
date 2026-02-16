@@ -1,3 +1,3 @@
-module github.com/opentorque/opentorque
+module github.com/xinlaoda/opentorque
 
 go 1.21

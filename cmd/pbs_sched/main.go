@@ -17,9 +17,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/opentorque/opentorque/internal/sched/client"
-	"github.com/opentorque/opentorque/internal/sched/config"
-	"github.com/opentorque/opentorque/internal/sched/scheduler"
+	"github.com/xinlaoda/opentorque/internal/sched/client"
+	"github.com/xinlaoda/opentorque/internal/sched/config"
+	"github.com/xinlaoda/opentorque/internal/sched/scheduler"
 )
 
 func main() {

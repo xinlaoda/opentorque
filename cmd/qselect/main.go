@@ -14,8 +14,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/opentorque/opentorque/internal/cli/client"
-	"github.com/opentorque/opentorque/internal/cli/dis"
+	"github.com/xinlaoda/opentorque/internal/cli/client"
+	"github.com/xinlaoda/opentorque/internal/cli/dis"
 )
 
 func main() {

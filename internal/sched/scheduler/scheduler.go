@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/opentorque/opentorque/internal/sched/client"
-	"github.com/opentorque/opentorque/internal/sched/config"
+	"github.com/xinlaoda/opentorque/internal/sched/client"
+	"github.com/xinlaoda/opentorque/internal/sched/config"
 )
 
 // JobInfo holds scheduling-relevant attributes for a single job.

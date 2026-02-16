@@ -16,12 +16,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/opentorque/opentorque/internal/auth"
-	"github.com/opentorque/opentorque/internal/config"
-	"github.com/opentorque/opentorque/internal/dis"
-	"github.com/opentorque/opentorque/internal/job"
-	"github.com/opentorque/opentorque/internal/node"
-	"github.com/opentorque/opentorque/internal/queue"
+	"github.com/xinlaoda/opentorque/internal/auth"
+	"github.com/xinlaoda/opentorque/internal/config"
+	"github.com/xinlaoda/opentorque/internal/dis"
+	"github.com/xinlaoda/opentorque/internal/job"
+	"github.com/xinlaoda/opentorque/internal/node"
+	"github.com/xinlaoda/opentorque/internal/queue"
 )
 
 // Config is the public configuration for creating a new server.

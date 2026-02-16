@@ -13,11 +13,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/opentorque/opentorque/internal/mom/config"
-	"github.com/opentorque/opentorque/internal/mom/dis"
-	"github.com/opentorque/opentorque/internal/mom/job"
-	"github.com/opentorque/opentorque/internal/mom/resource"
-	"github.com/opentorque/opentorque/internal/mom/server"
+	"github.com/xinlaoda/opentorque/internal/mom/config"
+	"github.com/xinlaoda/opentorque/internal/mom/dis"
+	"github.com/xinlaoda/opentorque/internal/mom/job"
+	"github.com/xinlaoda/opentorque/internal/mom/resource"
+	"github.com/xinlaoda/opentorque/internal/mom/server"
 )
 
 // Daemon is the main pbs_mom daemon.

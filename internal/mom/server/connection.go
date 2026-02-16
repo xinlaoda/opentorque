@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/opentorque/opentorque/internal/mom/config"
-	"github.com/opentorque/opentorque/internal/mom/dis"
-	"github.com/opentorque/opentorque/internal/mom/resource"
+	"github.com/xinlaoda/opentorque/internal/mom/config"
+	"github.com/xinlaoda/opentorque/internal/mom/dis"
+	"github.com/xinlaoda/opentorque/internal/mom/resource"
 )
 
 // IS protocol constants (Inter-Server protocol for status updates)
