@@ -35,77 +35,77 @@ ncpus  8
 | # | Parameter | C TORQUE | Go | Description |
 |---|-----------|----------|-----|-------------|
 | 1 | `$pbsserver` | ✅ | ✅ | PBS server hostname (can appear multiple times) |
-| 2 | `$clienthost` | ✅ | ❌ | Deprecated alias for `$pbsserver` |
-| 3 | `$restricted` | ✅ | ❌ | Hosts allowed to connect to MOM (wildcard support) |
-| 4 | `$timeout` | ✅ | ❌ | DIS TCP protocol timeout (seconds) |
-| 5 | `$max_conn_timeout_micro_sec` | ✅ | ❌ | Max connection timeout (microseconds) |
-| 6 | `$alias_server_name` | ✅ | ❌ | Alias name for the server |
-| 7 | `$pbsclient` | ✅ | ❌ | Client hosts authorized to submit jobs to MOM |
-| 8 | `$remote_reconfig` | ✅ | ❌ | Allow remote reconfiguration via qmgr |
+| 2 | `$clienthost` | ✅ | ✅ | Deprecated alias for `$pbsserver` |
+| 3 | `$restricted` | ✅ | ✅ | Hosts allowed to connect to MOM (wildcard support) |
+| 4 | `$timeout` | ✅ | ✅ | DIS TCP protocol timeout (seconds) |
+| 5 | `$max_conn_timeout_micro_sec` | ✅ | ✅ | Max connection timeout (microseconds) |
+| 6 | `$alias_server_name` | ✅ | ✅ | Alias name for the server |
+| 7 | `$pbsclient` | ✅ | ✅ | Client hosts authorized to submit jobs to MOM |
+| 8 | `$remote_reconfig` | ✅ | ✅ | Allow remote reconfiguration via qmgr |
 
 ### Load Management
 
 | # | Parameter | C TORQUE | Go | Description |
 |---|-----------|----------|-----|-------------|
-| 9 | `$ideal_load` | ✅ | ❌ | Ideal system load threshold (float) |
-| 10 | `$max_load` | ✅ | ❌ | Max system load threshold (float) |
-| 11 | `$auto_ideal_load` | ✅ | ❌ | Script to auto-compute ideal load |
-| 12 | `$auto_max_load` | ✅ | ❌ | Script to auto-compute max load |
+| 9 | `$ideal_load` | ✅ | ✅ | Ideal system load threshold (float) |
+| 10 | `$max_load` | ✅ | ✅ | Max system load threshold (float) |
+| 11 | `$auto_ideal_load` | ✅ | ✅ | Script to auto-compute ideal load |
+| 12 | `$auto_max_load` | ✅ | ✅ | Script to auto-compute max load |
 
 ### Resource Enforcement
 
 | # | Parameter | C TORQUE | Go | Description |
 |---|-----------|----------|-----|-------------|
-| 13 | `$ignwalltime` | ✅ | ❌ | Ignore walltime limit violations |
-| 14 | `$ignmem` | ✅ | ❌ | Ignore memory limit violations |
-| 15 | `$igncput` | ✅ | ❌ | Ignore CPU time violations |
-| 16 | `$ignvmem` | ✅ | ❌ | Ignore virtual memory violations |
-| 17 | `$cputmult` | ✅ | ❌ | CPU time multiplier factor (float) |
-| 18 | `$wallmult` | ✅ | ❌ | Walltime multiplier factor (float) |
+| 13 | `$ignwalltime` | ✅ | ✅ | Ignore walltime limit violations |
+| 14 | `$ignmem` | ✅ | ✅ | Ignore memory limit violations |
+| 15 | `$igncput` | ✅ | ✅ | Ignore CPU time violations |
+| 16 | `$ignvmem` | ✅ | ✅ | Ignore virtual memory violations |
+| 17 | `$cputmult` | ✅ | ✅ | CPU time multiplier factor (float) |
+| 18 | `$wallmult` | ✅ | ✅ | Walltime multiplier factor (float) |
 
 ### Logging
 
 | # | Parameter | C TORQUE | Go | Description |
 |---|-----------|----------|-----|-------------|
 | 19 | `$logevent` | ✅ | ✅ | Event logging bitmask (hex/decimal) |
-| 20 | `$loglevel` | ✅ | ❌ | Log verbosity level (integer) |
-| 21 | `$log_directory` | ✅ | ❌ | Custom log directory path |
-| 22 | `$log_file_max_size` | ✅ | ❌ | Max log file size (bytes) |
-| 23 | `$log_file_roll_depth` | ✅ | ❌ | Number of rolled log files to keep |
-| 24 | `$log_file_suffix` | ✅ | ❌ | Log file naming suffix |
-| 25 | `$log_keep_days` | ✅ | ❌ | Days to keep log files |
+| 20 | `$loglevel` | ✅ | ✅ | Log verbosity level (integer) |
+| 21 | `$log_directory` | ✅ | ✅ | Custom log directory path |
+| 22 | `$log_file_max_size` | ✅ | ✅ | Max log file size (bytes) |
+| 23 | `$log_file_roll_depth` | ✅ | ✅ | Number of rolled log files to keep |
+| 24 | `$log_file_suffix` | ✅ | ✅ | Log file naming suffix |
+| 25 | `$log_keep_days` | ✅ | ✅ | Days to keep log files |
 
 ### Job Execution
 
 | # | Parameter | C TORQUE | Go | Description |
 |---|-----------|----------|-----|-------------|
 | 26 | `$prologalarm` | ✅ | ✅ | Prolog/epilog timeout (seconds, default 300) |
-| 27 | `$job_starter` | ✅ | ❌ | Custom job starter executable |
-| 28 | `$job_starter_run_privileged` | ✅ | ❌ | Run job starter with elevated privileges |
-| 29 | `$preexec` | ✅ | ❌ | Prolog pre-execution config |
-| 30 | `$source_login_batch` | ✅ | ❌ | Source login env for batch jobs (default: true) |
-| 31 | `$source_login_interactive` | ✅ | ❌ | Source login env for interactive jobs (default: true) |
-| 32 | `$job_output_file_umask` | ✅ | ❌ | Umask for job output files |
-| 33 | `$jobstartblocktime` | ✅ | ❌ | Seconds to wait before backgrounding job launch (default: 5) |
-| 34 | `$job_exit_wait_time` | ✅ | ❌ | Wait time for job exit notification (default: 600) |
-| 35 | `$job_oom_score_adjust` | ✅ | ❌ | OOM killer score adjustment (-1000 to 1000) |
-| 36 | `$attempt_to_make_dir` | ✅ | ❌ | Create job directories if missing |
-| 37 | `$exec_with_exec` | ✅ | ❌ | Use exec() for job execution |
-| 38 | `$presetup_prologue` | ✅ | ❌ | Pre-setup prologue script path |
-| 39 | `$ext_pwd_retry` | ✅ | ❌ | External password check retries (default: 3) |
+| 27 | `$job_starter` | ✅ | ✅ | Custom job starter executable |
+| 28 | `$job_starter_run_privileged` | ✅ | ✅ | Run job starter with elevated privileges |
+| 29 | `$preexec` | ✅ | ✅ | Prolog pre-execution config |
+| 30 | `$source_login_batch` | ✅ | ✅ | Source login env for batch jobs (default: true) |
+| 31 | `$source_login_interactive` | ✅ | ✅ | Source login env for interactive jobs (default: true) |
+| 32 | `$job_output_file_umask` | ✅ | ✅ | Umask for job output files |
+| 33 | `$job_start_block_time` | ✅ | ✅ | Seconds to wait before backgrounding job launch (default: 5) |
+| 34 | `$job_exit_wait_time` | ✅ | ✅ | Wait time for job exit notification (default: 600) |
+| 35 | `$job_oom_score_adjust` | ✅ | ✅ | OOM killer score adjustment (-1000 to 1000) |
+| 36 | `$attempttomakedirectory` | ✅ | ✅ | Create job directories if missing |
+| 37 | `$exec_with_exec` | ✅ | ✅ | Use exec() for job execution |
+| 38 | `$presetup_prologue` | ✅ | ✅ | Pre-setup prologue script path |
+| 39 | `$ext_pwd_retry` | ✅ | ✅ | External password check retries (default: 3) |
 
 ### File & Directory
 
 | # | Parameter | C TORQUE | Go | Description |
 |---|-----------|----------|-----|-------------|
 | 40 | `$usecp` | ✅ | ✅ | File copy mapping (host:from → local) |
-| 41 | `$tmpdir` | ✅ | ❌ | Temporary directory for jobs |
-| 42 | `$nodefile_suffix` | ✅ | ❌ | Suffix for node names in hostfiles |
-| 43 | `$nospool_dir_list` | ✅ | ❌ | Directories not to spool |
-| 44 | `$rcpcmd` / `$rcp_cmd` | ✅ | ❌ | Path to RCP/SCP command for file transfer |
-| 45 | `$xauthpath` | ✅ | ❌ | Path to xauth executable |
-| 46 | `$spool_as_final_name` | ✅ | ❌ | Use spool filename as final output name |
-| 47 | `$remote_checkpoint_dirs` | ✅ | ❌ | Remote checkpoint directories |
+| 41 | `$tmpdir` | ✅ | ✅ | Temporary directory for jobs |
+| 42 | `$nodefile_suffix` | ✅ | ✅ | Suffix for node names in hostfiles |
+| 43 | `$nospool_dir_list` | ✅ | ✅ | Directories not to spool |
+| 44 | `$rcpcmd` | ✅ | ✅ | Path to RCP/SCP command for file transfer |
+| 45 | `$xauthpath` | ✅ | ✅ | Path to xauth executable |
+| 46 | `$spool_as_final_name` | ✅ | ✅ | Use spool filename as final output name |
+| 47 | `$remote_checkpoint_dirs` | ✅ | ✅ | Remote checkpoint directories |
 
 ### Status & Polling
 
@@ -113,77 +113,77 @@ ncpus  8
 |---|-----------|----------|-----|-------------|
 | 48 | `$check_poll_time` | ✅ | ✅ | Resource monitoring check interval (default: 45s) |
 | 49 | `$status_update_time` | ✅ | ✅ | Status update interval to server (default: 45s) |
-| 50 | `$max_updates_before_sending` | ✅ | ❌ | Batch job updates before server sync |
+| 50 | `$max_updates_before_sending` | ✅ | ✅ | Batch job updates before server sync |
 
 ### Node Health
 
 | # | Parameter | C TORQUE | Go | Description |
 |---|-----------|----------|-----|-------------|
-| 51 | `$node_check_script` | ✅ | ❌ | Node health check script |
-| 52 | `$node_check_interval` | ✅ | ❌ | Health check interval; supports "jobstart"/"jobend" |
+| 51 | `$node_check_script` | ✅ | ✅ | Node health check script |
+| 52 | `$node_check_interval` | ✅ | ✅ | Health check interval; supports "jobstart"/"jobend" |
 
 ### Configuration Management
 
 | # | Parameter | C TORQUE | Go | Description |
 |---|-----------|----------|-----|-------------|
-| 53 | `$configversion` | ✅ | ❌ | Config version string for tracking |
+| 53 | `$configversion` | ✅ | ✅ | Config version string for tracking |
 | 54 | `$enablemomrestart` | ✅ | ✅ | Allow MOM to restart on config change |
 | 55 | `$down_on_error` | ✅ | ✅ | Set MOM down on critical errors |
-| 56 | `$force_overwrite` | ✅ | ❌ | Force file overwriting |
+| 56 | `$force_overwrite` | ✅ | ✅ | Force file overwriting |
 | 57 | `$mom_host` | ✅ | ✅ | Override MOM hostname |
-| 58 | `$reject_job_submission` | ✅ | ❌ | Reject new job submissions |
+| 58 | `$reject_job_submission` | ✅ | ✅ | Reject new job submissions |
 
 ### Checkpoint
 
 | # | Parameter | C TORQUE | Go | Description |
 |---|-----------|----------|-----|-------------|
-| 59 | `$checkpoint_interval` | ✅ | ❌ | Checkpoint frequency |
-| 60 | `$checkpoint_script` | ✅ | ❌ | Checkpoint script path |
-| 61 | `$restart_script` | ✅ | ❌ | Restart from checkpoint script path |
-| 62 | `$checkpoint_run_exe` | ✅ | ❌ | Checkpoint executable name |
+| 59 | `$checkpoint_interval` | ✅ | ✅ | Checkpoint frequency |
+| 60 | `$checkpoint_script` | ✅ | ✅ | Checkpoint script path |
+| 61 | `$restart_script` | ✅ | ✅ | Restart from checkpoint script path |
+| 62 | `$checkpoint_run_exe` | ✅ | ✅ | Checkpoint executable name |
 
 ### Variable Attributes
 
 | # | Parameter | C TORQUE | Go | Description |
 |---|-----------|----------|-----|-------------|
-| 63 | `$varattr` | ✅ | ❌ | Variable attribute (format: `<TTL> <PATH>`) |
+| 63 | `$varattr` | ✅ | ✅ | Variable attribute (format: `<TTL> <PATH>`) |
 
 ### Memory & CPU (Linux-specific)
 
 | # | Parameter | C TORQUE | Go | Description |
 |---|-----------|----------|-----|-------------|
-| 64 | `$use_smt` | ✅ | ❌ | Use simultaneous multi-threading (default: 1) |
-| 65 | `$memory_pressure_threshold` | ✅ | ❌ | Memory pressure kill threshold |
-| 66 | `$memory_pressure_duration` | ✅ | ❌ | Memory pressure monitoring duration |
-| 67 | `$mom_oom_immunize` | ✅ | ❌ | Make MOM process OOM-immune (default: 1) |
+| 64 | `$use_smt` | ✅ | ✅ | Use simultaneous multi-threading (default: 1) |
+| 65 | `$memory_pressure_threshold` | ✅ | ✅ | Memory pressure kill threshold |
+| 66 | `$memory_pressure_duration` | ✅ | ✅ | Memory pressure monitoring duration |
+| 67 | `$mom_oom_immunize` | ✅ | ✅ | Make MOM process OOM-immune (default: 1) |
 
 ### Job Hierarchy & Clustering
 
 | # | Parameter | C TORQUE | Go | Description |
 |---|-----------|----------|-----|-------------|
-| 68 | `$max_join_job_wait_time` | ✅ | ❌ | Max wait for job join (default: 600s) |
-| 69 | `$resend_join_job_wait_time` | ✅ | ❌ | Resend wait for job join (default: 300s) |
-| 70 | `$mom_hierarchy_retry_time` | ✅ | ❌ | Hierarchy retry interval |
-| 71 | `$jobdirectory_sticky` | ✅ | ❌ | Keep job directory across restarts |
+| 68 | `$max_join_job_wait_time` | ✅ | ✅ | Max wait for job join (default: 600s) |
+| 69 | `$resend_join_job_wait_time` | ✅ | ✅ | Resend wait for job join (default: 300s) |
+| 70 | `$mom_hierarchy_retry_time` | ✅ | ✅ | Hierarchy retry interval |
+| 71 | `$job_directory_sticky` | ✅ | ✅ | Keep job directory across restarts |
 
 ### Hardware-specific
 
 | # | Parameter | C TORQUE | Go | Description |
 |---|-----------|----------|-----|-------------|
-| 72 | `$cuda_visible_devices` | ✅ | ❌ | CUDA GPU visibility control (default: 1) |
+| 72 | `$cuda_visible_devices` | ✅ | ✅ | CUDA GPU visibility control (default: 1) |
 | 73 | `$cray_check_rur` | ✅ | ❌ | Cray Resource Utilization Record check |
 | 74 | `$apbasil_path` | ✅ | ❌ | ALPS BASIL command path (Cray) |
 | 75 | `$apbasil_protocol` | ✅ | ❌ | ALPS BASIL protocol version (Cray) |
-| 76 | `$alloc_par_cmd` | ✅ | ❌ | Allocation parallel command |
+| 76 | `$alloc_par_cmd` | ✅ | ✅ | Allocation parallel command |
 
 ### Advanced
 
 | # | Parameter | C TORQUE | Go | Description |
 |---|-----------|----------|-----|-------------|
-| 77 | `$reduce_prolog_checks` | ✅ | ❌ | Skip redundant prolog checks |
-| 78 | `$thread_unlink_calls` | ✅ | ❌ | Threaded file unlink (default: true) |
-| 79 | `$reporter_mom` | ✅ | ❌ | MOM is a reporter node |
-| 80 | `$login_node` | ✅ | ❌ | MOM is a login node |
+| 77 | `$reduce_prolog_checks` | ✅ | ✅ | Skip redundant prolog checks |
+| 78 | `$thread_unlink_calls` | ✅ | ✅ | Threaded file unlink (default: true) |
+| 79 | `$reporter_mom` | ✅ | ✅ | MOM is a reporter node |
+| 80 | `$login_node` | ✅ | ✅ | MOM is a login node |
 
 ### Static Resources
 
@@ -197,53 +197,31 @@ ncpus  8
 
 | Category | C TORQUE | Go OpenTorque | Coverage |
 |----------|----------|---------------|----------|
-| Server & connection | 8 | 1 | 12% |
-| Load management | 4 | 0 | 0% |
-| Resource enforcement | 6 | 0 | 0% |
-| Logging | 7 | 1 | 14% |
-| Job execution | 14 | 1 | 7% |
-| File & directory | 8 | 1 | 12% |
-| Status & polling | 3 | 2 | 67% |
-| Node health | 2 | 0 | 0% |
-| Configuration mgmt | 6 | 3 | 50% |
-| Checkpoint | 4 | 0 | 0% |
-| Variable attrs | 1 | 0 | 0% |
-| Memory & CPU | 4 | 0 | 0% |
-| Job hierarchy | 4 | 0 | 0% |
-| Hardware-specific | 5 | 0 | 0% |
-| Advanced | 4 | 0 | 0% |
+| Server & connection | 8 | 8 | 100% |
+| Load management | 4 | 4 | 100% |
+| Resource enforcement | 6 | 6 | 100% |
+| Logging | 7 | 7 | 100% |
+| Job execution | 14 | 14 | 100% |
+| File & directory | 8 | 8 | 100% |
+| Status & polling | 3 | 3 | 100% |
+| Node health | 2 | 2 | 100% |
+| Configuration mgmt | 6 | 6 | 100% |
+| Checkpoint | 4 | 4 | 100% |
+| Variable attrs | 1 | 1 | 100% |
+| Memory & CPU | 4 | 4 | 100% |
+| Job hierarchy | 4 | 4 | 100% |
+| Hardware-specific | 5 | 2 | 40% |
+| Advanced | 4 | 4 | 100% |
 | Static resources | ✅ | ✅ | 100% |
-| **TOTAL directives** | **80** | **9** | **~11%** |
+| **TOTAL directives** | **80** | **77** | **~96%** |
 
 ---
 
-## Priority Implementation Roadmap
+## Remaining Gaps
 
-### High Priority (production-critical)
+The only unimplemented directives are Cray-specific parameters that are not
+applicable to standard Linux clusters:
 
-1. **`$restricted`** — Security: control which hosts can connect to MOM
-2. **`$ideal_load` / `$max_load`** — Load-based scheduling decisions
-3. **`$tmpdir`** — Job temporary directory control
-4. **`$node_check_script` / `$node_check_interval`** — Node health monitoring
-5. **`$loglevel`** / **`$log_directory`** — Operational logging control
-6. **`$ignwalltime` / `$ignmem`** — Resource enforcement flexibility
-7. **`$source_login_batch`** — Job environment setup
-8. **`$job_output_file_umask`** — Output file permissions
-
-### Medium Priority (operational)
-
-9. **`$rcpcmd`** — File transfer for distributed clusters
-10. **`$nospool_dir_list`** — Spool management for shared filesystems
-11. **`$checkpoint_script` / `$restart_script`** — Job checkpointing
-12. **`$configversion`** — Configuration tracking
-13. **`$timeout`** — Connection reliability
-14. **`$job_exit_wait_time`** — Job cleanup timing
-15. **`$cputmult` / `$wallmult`** — Heterogeneous cluster normalization
-16. **`$varattr`** — Dynamic node attributes
-
-### Low Priority (advanced/hardware-specific)
-
-17. Cray-specific (`$apbasil_path`, `$cray_check_rur`)
-18. CUDA (`$cuda_visible_devices`)
-19. Memory pressure (`$memory_pressure_threshold`)
-20. Job hierarchy (`$mom_hierarchy_retry_time`)
+1. **`$cray_check_rur`** — Cray Resource Utilization Record check
+2. **`$apbasil_path`** — ALPS BASIL command path (Cray)
+3. **`$apbasil_protocol`** — ALPS BASIL protocol version (Cray)
