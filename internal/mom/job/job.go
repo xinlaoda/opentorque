@@ -157,6 +157,10 @@ type Job struct {
 	Rerunnable  bool
 	Checkpoint  string // checkpoint mode
 
+	// File staging
+	StageinList  string // stagein spec from server
+	StageoutList string // stageout spec from server
+
 	// Internal
 	Process    *os.Process
 	SessionID  int

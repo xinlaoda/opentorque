@@ -114,6 +114,7 @@ type Job struct {
 	DependList    string // -W depend=: job dependencies
 	StageinList   string // -W stagein=: file staging
 	StageoutList  string // -W stageout=: file staging
+	GroupList     string // -W group_list=: group list
 	JobArrayReq   string // -t: job array range
 	InitWorkDir   string // -d: initial working directory
 	RootDir       string // -D: root (chroot) directory

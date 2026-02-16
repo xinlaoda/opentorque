@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strconv"
 	"strings"
@@ -375,6 +376,13 @@ func (d *Daemon) processExitedJob(j *job.Job) {
 	// Run epilogue
 	d.executor.RunEpilog(j, d.cfg.PathEpilog, d.cfg.PathEpilogUser, d.cfg.PrologAlarm)
 
+	// Perform stageout file transfers after epilogue
+	if j.StageoutList != "" {
+		if err := performStaging(j.StageoutList, "stageout", j.ID); err != nil {
+			log.Printf("[MOM] Stageout failed for %s: %v", j.ID, err)
+		}
+	}
+
 	// Send obit
 	d.sendJobObit(j)
 
@@ -716,6 +724,15 @@ func (d *Daemon) handleCommit(conn net.Conn, reader *dis.Reader, header *dis.Req
 	// Create node file
 	d.executor.CreateNodeFile(j)
 
+	// Perform stagein file transfers before prologue
+	if j.StageinList != "" {
+		if err := performStaging(j.StageinList, "stagein", j.ID); err != nil {
+			log.Printf("[MOM] Stagein failed for %s: %v", jobID, err)
+			dis.SendErrorReply(conn, dis.PbsErrSystem, 0)
+			return false
+		}
+	}
+
 	// Run prologue
 	if err := d.executor.RunProlog(j, d.cfg.PathProlog, d.cfg.PathPrologUser, d.cfg.PrologAlarm); err != nil {
 		log.Printf("[MOM] Prologue failed for %s: %v", jobID, err)
@@ -982,6 +999,10 @@ func applyJobAttribute(j *job.Job, attr svrAttr) {
 				j.ResourceReq.Nodes = n
 			}
 		}
+	case "stagein":
+		j.StageinList = attr.value
+	case "stageout":
+		j.StageoutList = attr.value
 	}
 }
 
@@ -1030,4 +1051,43 @@ return fmt.Errorf("read extend string: %w", err)
 }
 }
 return nil
+}
+
+// performStaging executes file staging operations (stagein or stageout).
+// Format: "local_file@remote_host:remote_path[,local2@host2:path2]"
+// Uses scp for remote transfers and cp for local transfers.
+func performStaging(spec, direction, jobID string) error {
+	for _, item := range strings.Split(spec, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		// Parse "local@host:remote" format
+		atIdx := strings.Index(item, "@")
+		if atIdx < 0 {
+			log.Printf("[MOM] %s: invalid spec %q (missing @) for job %s", direction, item, jobID)
+			continue
+		}
+		localFile := item[:atIdx]
+		remote := item[atIdx+1:] // "host:path"
+
+		var cmd *exec.Cmd
+		if direction == "stagein" {
+			// Copy from remote to local
+			log.Printf("[MOM] Stagein for %s: %s -> %s", jobID, remote, localFile)
+			cmd = exec.Command("scp", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes", remote, localFile)
+		} else {
+			// Copy from local to remote
+			log.Printf("[MOM] Stageout for %s: %s -> %s", jobID, localFile, remote)
+			cmd = exec.Command("scp", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes", localFile, remote)
+		}
+
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			log.Printf("[MOM] %s failed for %s: %v output=%s", direction, jobID, err, string(output))
+			return fmt.Errorf("%s %q: %w", direction, item, err)
+		}
+		log.Printf("[MOM] %s completed for %s: %s", direction, jobID, item)
+	}
+	return nil
 }

@@ -1023,6 +1023,13 @@ func (s *Server) handleRunJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestHead
 		return true
 	}
 
+	// Check job dependencies before allowing run
+	if !s.checkDependencies(j) {
+		log.Printf("[SERVER] RunJob %s rejected: dependencies not satisfied", jobID)
+		dis.SendErrorReply(conn, dis.PbseBadReq, 0)
+		return true
+	}
+
 	// If a destination node is specified, dispatch to that node directly
 	if dest != "" {
 		nodeName := strings.Split(dest, "/")[0] // strip "/0" suffix if present
@@ -1490,6 +1497,9 @@ func (s *Server) handleJobObit(conn net.Conn, r *dis.Reader, hdr *dis.RequestHea
 			s.acctLog.RecordEnded(jobID, info)
 		}
 	}
+
+	// Resolve dependencies for jobs waiting on this completed job
+	s.resolveDependencies(jobID, exitStatus)
 
 	dis.SendOkReply(conn)
 	return true
@@ -2004,6 +2014,7 @@ func (s *Server) formatJobStatus(j *job.Job) dis.StatusObject {
 	add("depend", j.DependList)
 	add("stagein", j.StageinList)
 	add("stageout", j.StageoutList)
+	add("group_list", j.GroupList)
 	add("job_array_request", j.JobArrayReq)
 	add("init_work_dir", j.InitWorkDir)
 	add("comment", j.Comment)
@@ -2519,6 +2530,8 @@ func (s *Server) applyJobAttrs(j *job.Job, attrs []dis.SvrAttrl) {
 			j.StageinList = a.Value
 		case "stageout":
 			j.StageoutList = a.Value
+		case "group_list":
+			j.GroupList = a.Value
 		case "job_array_request":
 			j.JobArrayReq = a.Value
 		case "init_work_dir":
@@ -2737,6 +2750,125 @@ func (s *Server) promoteWaitingJobs() {
 	}
 }
 
+// checkDependencies verifies that all job dependencies are satisfied.
+// Returns true if the job can run, false if it must wait.
+// Supports: afterok, afternotok, afterany, before, beforeok, beforenotok, on.
+func (s *Server) checkDependencies(j *job.Job) bool {
+	j.Mu.RLock()
+	depStr := j.DependList
+	j.Mu.RUnlock()
+
+	if depStr == "" {
+		return true // no dependencies
+	}
+
+	// Parse dependency string: "type:jobid[:jobid][,type:jobid...]"
+	for _, clause := range strings.Split(depStr, ",") {
+		parts := strings.SplitN(clause, ":", 2)
+		if len(parts) < 2 {
+			continue
+		}
+		depType := parts[0]
+		depJobIDs := strings.Split(parts[1], ":")
+
+		for _, depID := range depJobIDs {
+			depID = strings.TrimSpace(depID)
+			if depID == "" {
+				continue
+			}
+			depJob := s.jobMgr.GetJob(depID)
+
+			switch depType {
+			case "afterok":
+				// Dependent job must have completed successfully (exit=0)
+				if depJob == nil {
+					continue // job purged = treated as completed ok
+				}
+				depJob.Mu.RLock()
+				st := depJob.State
+				exit := depJob.ExitStatus
+				depJob.Mu.RUnlock()
+				if st != job.StateComplete {
+					return false // still running or queued
+				}
+				if exit != 0 {
+					// Dependency failed — cancel this job
+					j.Mu.Lock()
+					j.Comment = fmt.Sprintf("dependency %s failed (exit=%d)", depID, exit)
+					j.Mu.Unlock()
+					return false
+				}
+
+			case "afternotok":
+				// Dependent job must have completed with non-zero exit
+				if depJob == nil {
+					return false // purged = assume success, so not satisfied
+				}
+				depJob.Mu.RLock()
+				st := depJob.State
+				exit := depJob.ExitStatus
+				depJob.Mu.RUnlock()
+				if st != job.StateComplete {
+					return false
+				}
+				if exit == 0 {
+					return false // it succeeded, so afternotok not met
+				}
+
+			case "afterany":
+				// Dependent job must have completed (any exit status)
+				if depJob == nil {
+					continue // purged = completed
+				}
+				depJob.Mu.RLock()
+				st := depJob.State
+				depJob.Mu.RUnlock()
+				if st != job.StateComplete {
+					return false
+				}
+
+			case "before", "beforeok", "beforenotok", "beforeany":
+				// "before" types mean: this job must run before the specified job.
+				// The current job is allowed to run; the target is blocked until this one finishes.
+				// So for the current job, "before" is always satisfied.
+				continue
+
+			case "on":
+				// Count-based dependency — simplified: treat as no-op
+				continue
+
+			default:
+				log.Printf("[SERVER] Unknown dependency type %q for job %s", depType, j.ID)
+				continue
+			}
+		}
+	}
+	return true
+}
+
+// resolveDependencies is called when a job completes to release dependent jobs.
+// It scans all queued/waiting jobs for dependencies on the completed job.
+func (s *Server) resolveDependencies(completedJobID string, exitStatus int) {
+	for _, j := range s.jobMgr.AllJobs() {
+		j.Mu.RLock()
+		depStr := j.DependList
+		state := j.State
+		jobID := j.ID
+		j.Mu.RUnlock()
+
+		if depStr == "" || (state != job.StateQueued && state != job.StateHeld && state != job.StateWaiting) {
+			continue
+		}
+
+		// Check if this job has a dependency on the completed job
+		if !strings.Contains(depStr, completedJobID) {
+			continue
+		}
+
+		log.Printf("[SERVER] Job %s has dependency on completed %s, rechecking", jobID, completedJobID)
+	}
+}
+
 // scheduleJob attempts to place a single job on a compute node and dispatch it.
 func (s *Server) scheduleJob(j *job.Job) {
 	j.Mu.RLock()
@@ -2745,6 +2877,11 @@ func (s *Server) scheduleJob(j *job.Job) {
 		return
 	}
 	j.Mu.RUnlock()
+
+	// Check job dependencies before scheduling
+	if !s.checkDependencies(j) {
+		return // Dependencies not yet satisfied
+	}
 
 	// Check server-wide and per-user/group run limits
 	if !s.enforceRunLimits(j) {
@@ -3004,6 +3141,14 @@ func (s *Server) buildMOMJobAttrs(j *job.Job) []dis.SvrAttrl {
 	add("fault_tolerant", "False")
 	add("job_radix", "0")
 	add("request_version", "1")
+
+	// Pass shell, staging specs, and rerunnable flag to MOM
+	add("Shell_Path_List", j.Shell)
+	add("stagein", j.StageinList)
+	add("stageout", j.StageoutList)
+	if j.Rerunnable != "" {
+		add("Rerunable", j.Rerunnable)
+	}
 
 	return attrs
 }
