@@ -32,6 +32,13 @@ The Go implementation uses HMAC-SHA256 token authentication.
 | `-Q` | | Display queue status instead of job status. |
 | `-B` | | Display server status instead of job status. |
 | `-s` | server | Connect to the specified PBS server instead of the default. |
+| `-c` | | Do not display completed jobs. Filters out jobs in C state. |
+| `-x` | | XML output format. Wraps output in `<Data><Job>...</Job></Data>`. |
+| `-1` | | Display node list on same line as job (used with `-n` mode). Compatibility flag. |
+| `-G` | | Show sizes in gigabytes. Compatibility flag. |
+| `-M` | | Show sizes in megawords. Compatibility flag. |
+| `-t` | | Show job array information. Compatibility flag. |
+| `-e` | | Display only jobs in execution state. Compatibility flag. |
 
 ## Job States
 

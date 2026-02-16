@@ -25,7 +25,10 @@ The Go implementation uses HMAC-SHA256 token authentication.
 | `-r` | | Reset the node. Equivalent to `-c` (clear offline state). |
 | `-N` | note | Set a note (comment) on the specified node(s). Useful for recording maintenance information. |
 | `-q` | | Quiet mode. Suppress non-essential output. |
-| `-x` | | XML output format (reserved for future implementation). |
+| `-x` | | XML output format. Wraps nodes in `<Data><Node>...</Node></Data>`. |
+| `-A` | note | Append text to the existing note on the specified node(s). |
+| `-n` | | Show only node notes. |
+| `-d` | | Diagnostic mode (verbose output). Compatibility flag. |
 | `-s` | server | Connect to the specified PBS server instead of the default. |
 
 ## Node States

@@ -3,8 +3,9 @@
 ## Synopsis
 
 ```
-qselect [-h hold_list] [-l resource_list] [-N name] [-p priority]
-        [-q queue] [-s states] [-u user_list]
+qselect [-a datetime] [-A account] [-c checkpoint] [-h hold_list]
+        [-l resource_list] [-N name] [-p priority] [-q queue]
+        [-r y|n] [-s states] [-u user_list]
 ```
 
 ## Description
@@ -15,11 +16,16 @@ qselect [-h hold_list] [-l resource_list] [-N name] [-p priority]
 
 | Flag | Argument | Description |
 |------|----------|-------------|
+| `-a` | datetime | Select by execution time. Supports comparison operators (e.g., `ge:202301011200`). |
+| `-A` | account | Select by account name. |
+| `-c` | checkpoint | Select by checkpoint option. |
 | `-h` | hold_list | Select by hold type (u/o/s/n) |
 | `-l` | resource_list | Select by resource (e.g., `walltime=1:00:00`) |
 | `-N` | name | Select by job name |
 | `-q` | queue | Select by queue name |
 | `-s` | states | Select by state: Q (queued), R (running), H (held), C (complete) |
+| `-p` | priority | Select by priority. Supports comparison operators (e.g., `ge:100`). |
+| `-r` | y/n | Select by rerunnable attribute (`y` or `n`). |
 | `-u` | user_list | Select by job owner (comma-separated) |
 
 ## Protocol

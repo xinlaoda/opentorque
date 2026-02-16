@@ -25,7 +25,12 @@ qalter [options] job_id...
 | `-p` | priority | Job priority (-1024 to +1023) |
 | `-r` | y/n | Whether the job is rerunable |
 | `-S` | shell | Shell path for job script |
-| `-W` | attrs | Additional attributes as key=value pairs |
+| `-A` | account | Set account name (sets the `Account_Name` attribute). |
+| `-c` | checkpoint | Set checkpoint interval: `none`, `enabled`, `interval`, `shutdown`, `periodic`. |
+| `-j` | join | Join stdout/stderr streams: `oe` (merge into stdout), `eo` (merge into stderr), `n` (do not join). |
+| `-k` | keep | Keep output files on execution host: `o` (stdout), `e` (stderr), `oe` (both), `n` (return to server). |
+| `-q` | queue | Move job to a different queue. |
+| `-W` | attrs | Extended attributes as comma-separated key=value pairs. |
 
 ## Protocol
 

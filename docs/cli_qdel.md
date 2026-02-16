@@ -21,6 +21,8 @@ The Go implementation uses HMAC-SHA256 token authentication.
 | `-p` | | Purge the job. Forces deletion even if the MOM is unreachable. |
 | `-m` | message | Attach a message to the deletion event (recorded in server logs). |
 | `-s` | server | Connect to the specified PBS server instead of the default. |
+| `-t` | array_range | Array range specification for job array deletion. Compatibility flag. |
+| `-W` | delay | Delay before deletion (in seconds). Compatibility flag. |
 
 ## Exit Status
 
