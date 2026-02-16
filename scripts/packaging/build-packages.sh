@@ -387,6 +387,7 @@ EOF
         echo "/usr/local/bin/$b" >> "$RPM_TOP/SPECS/${PKG_NAME}.spec"
       done
       cat >> "$RPM_TOP/SPECS/${PKG_NAME}.spec" <<'EOF'
+/etc/profile.d/opentorque.sh
 %config(noreplace) /var/spool/torque/auth_key
 %dir /var/spool/torque
 
