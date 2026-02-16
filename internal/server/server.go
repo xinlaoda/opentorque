@@ -894,6 +894,7 @@ func (s *Server) handleReleaseJob(conn net.Conn, r *dis.Reader, hdr *dis.Request
 	}
 
 	j.Mu.Lock()
+	j.HoldTypes = "" // Clear hold types on release
 	if j.State == job.StateHeld {
 		j.SetState(job.StateQueued, job.SubstateQueued)
 		if q := s.queueMgr.GetQueue(j.Queue); q != nil {
