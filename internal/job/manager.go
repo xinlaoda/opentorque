@@ -159,6 +159,22 @@ func (m *Manager) StateCount(state int) int {
 	return 0
 }
 
+// CountByState counts jobs by iterating all jobs and checking actual state.
+// More accurate than StateCount during scheduling when states are in flux.
+func (m *Manager) CountByState(state int) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	count := 0
+	for _, j := range m.jobs {
+		j.Mu.RLock()
+		if j.State == state {
+			count++
+		}
+		j.Mu.RUnlock()
+	}
+	return count
+}
+
 // JobsInQueue returns all jobs belonging to a specific queue.
 func (m *Manager) JobsInQueue(queueName string) []*Job {
 	m.mu.RLock()
@@ -187,4 +203,49 @@ func (m *Manager) CompletedJobs() []*Job {
 		j.Mu.RUnlock()
 	}
 	return result
+}
+
+// CountJobsByOwner returns total jobs owned by a given user.
+func (m *Manager) CountJobsByOwner(owner string) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	count := 0
+	for _, j := range m.jobs {
+		j.Mu.RLock()
+		if j.Owner == owner {
+			count++
+		}
+		j.Mu.RUnlock()
+	}
+	return count
+}
+
+// CountRunningByOwner returns running jobs owned by a given user.
+func (m *Manager) CountRunningByOwner(owner string) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	count := 0
+	for _, j := range m.jobs {
+		j.Mu.RLock()
+		if j.State == StateRunning && j.Owner == owner {
+			count++
+		}
+		j.Mu.RUnlock()
+	}
+	return count
+}
+
+// CountRunningByGroup returns running jobs belonging to a given group.
+func (m *Manager) CountRunningByGroup(group string) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	count := 0
+	for _, j := range m.jobs {
+		j.Mu.RLock()
+		if j.State == StateRunning && j.EGroup == group {
+			count++
+		}
+		j.Mu.RUnlock()
+	}
+	return count
 }

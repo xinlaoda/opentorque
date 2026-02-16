@@ -183,7 +183,7 @@ func listObject(conn *client.Conn, objType int, name string) error {
 	return nil
 }
 
-// parseAttrs parses "attr = value" tokens into svrattrl list.
+// parseAttrs parses "attr = value" or "attr += value" tokens into svrattrl list.
 func parseAttrs(tokens []string) []dis.SvrAttrl {
 	// Join remaining tokens and split by commas for multiple attrs
 	remaining := strings.Join(tokens, " ")
@@ -194,8 +194,49 @@ func parseAttrs(tokens []string) []dis.SvrAttrl {
 	var attrs []dis.SvrAttrl
 	for _, part := range strings.Split(remaining, ",") {
 		part = strings.TrimSpace(part)
+
+		// Detect += (INCR) operator
+		if idx := strings.Index(part, "+="); idx >= 0 {
+			key := strings.TrimSpace(part[:idx])
+			val := strings.TrimSpace(part[idx+2:])
+			attr := dis.SvrAttrl{Name: key, Value: val, Op: 7} // INCR (append)
+			if dotIdx := strings.Index(key, "."); dotIdx > 0 {
+				attr.Name = key[:dotIdx]
+				attr.HasResc = true
+				attr.Resc = key[dotIdx+1:]
+			}
+			attrs = append(attrs, attr)
+			continue
+		}
+
+		// Detect -= (DECR/remove) operator
+		if idx := strings.Index(part, "-="); idx >= 0 {
+			key := strings.TrimSpace(part[:idx])
+			val := strings.TrimSpace(part[idx+2:])
+			attr := dis.SvrAttrl{Name: key, Value: val, Op: 8} // DECR (remove)
+			if dotIdx := strings.Index(key, "."); dotIdx > 0 {
+				attr.Name = key[:dotIdx]
+				attr.HasResc = true
+				attr.Resc = key[dotIdx+1:]
+			}
+			attrs = append(attrs, attr)
+			continue
+		}
+
 		eqIdx := strings.Index(part, "=")
 		if eqIdx < 0 {
+			// No '=' sign — this is an unset operation (just attribute name)
+			key := strings.TrimSpace(part)
+			if key == "" {
+				continue
+			}
+			attr := dis.SvrAttrl{Name: key, Op: 1}
+			if dotIdx := strings.Index(key, "."); dotIdx > 0 {
+				attr.Name = key[:dotIdx]
+				attr.HasResc = true
+				attr.Resc = key[dotIdx+1:]
+			}
+			attrs = append(attrs, attr)
 			continue
 		}
 		key := strings.TrimSpace(part[:eqIdx])

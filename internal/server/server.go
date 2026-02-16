@@ -542,6 +542,13 @@ func (s *Server) handleQueueJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestHe
 		j.Owner = hdr.User
 	}
 
+	// Enforce ACL and resource limits before accepting the job
+	if err := s.enforceSubmitLimits(j, hdr.User); err != nil {
+		log.Printf("[SERVER] Job rejected: %v", err)
+		dis.SendErrorReply(conn, dis.PbsePerm, 0)
+		return false
+	}
+
 	// Store the job (transit state) pending further steps
 	s.jobMgr.AddJob(j)
 
@@ -910,6 +917,13 @@ func (s *Server) handleRunJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestHead
 	}
 	j.Mu.RUnlock()
 
+	// Enforce server-wide and per-user/group run limits
+	if !s.enforceRunLimits(j) {
+		log.Printf("[SERVER] RunJob %s rejected: run limits exceeded", jobID)
+		dis.SendErrorReply(conn, dis.PbsePerm, 0)
+		return true
+	}
+
 	// If a destination node is specified, dispatch to that node directly
 	if dest != "" {
 		nodeName := strings.Split(dest, "/")[0] // strip "/0" suffix if present
@@ -1087,6 +1101,10 @@ func (s *Server) handleManager(conn net.Conn, r *dis.Reader, hdr *dis.RequestHea
 		dis.SendErrorReply(conn, dis.PbseBadReq, 0)
 	} else {
 		dis.SendOkReply(conn)
+		// Persist server config changes immediately
+		if objType == dis.MgrObjServer {
+			s.saveServerDB()
+		}
 	}
 	return true
 }
@@ -1494,10 +1512,12 @@ func (s *Server) mgrSetServer(attrs []dis.SvrAttrl) error {
 	defer s.mu.Unlock()
 	for _, a := range attrs {
 		switch a.Name {
+		// Core
 		case "scheduling":
-			s.cfg.Scheduling = (a.Value == "True" || a.Value == "true")
+			s.cfg.Scheduling = parseBool(a.Value)
 		case "default_queue":
 			s.cfg.DefaultQueue = a.Value
+		// Scheduling & timing
 		case "scheduler_iteration":
 			fmt.Sscanf(a.Value, "%d", &s.cfg.SchedulerIteration)
 		case "node_check_rate":
@@ -1506,15 +1526,310 @@ func (s *Server) mgrSetServer(attrs []dis.SvrAttrl) error {
 			fmt.Sscanf(a.Value, "%d", &s.cfg.TCPTimeout)
 		case "keep_completed":
 			fmt.Sscanf(a.Value, "%d", &s.cfg.KeepCompleted)
+		case "job_stat_rate":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.JobStatRate)
+		case "poll_jobs":
+			s.cfg.PollJobs = parseBool(a.Value)
+		case "ping_rate":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.PingRate)
+		case "job_start_timeout":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.JobStartTimeout)
+		case "job_force_cancel_time":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.JobForceCancelTime)
+		case "job_sync_timeout":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.JobSyncTimeout)
+		// Logging
 		case "log_events":
 			fmt.Sscanf(a.Value, "%d", &s.cfg.LogLevel)
+		case "log_file_max_size":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.LogFileMaxSize)
+		case "log_file_roll_depth":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.LogFileRollDepth)
+		case "log_keep_days":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.LogKeepDays)
+		case "record_job_info":
+			s.cfg.RecordJobInfo = parseBool(a.Value)
+		case "record_job_script":
+			s.cfg.RecordJobScript = parseBool(a.Value)
+		case "job_log_file_max_size":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.JobLogFileMaxSize)
+		case "job_log_file_roll_depth":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.JobLogFileRollDepth)
+		case "job_log_keep_days":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.JobLogKeepDays)
+		// ACL
+		case "managers":
+			s.cfg.Managers = mergeACLValue(s.cfg.Managers, a.Value, a.Op)
+		case "operators":
+			s.cfg.Operators = mergeACLValue(s.cfg.Operators, a.Value, a.Op)
+		case "acl_host_enable":
+			s.cfg.ACLHostEnable = parseBool(a.Value)
+		case "acl_hosts":
+			s.cfg.ACLHosts = mergeACLValue(s.cfg.ACLHosts, a.Value, a.Op)
+		case "acl_user_enable":
+			s.cfg.ACLUserEnable = parseBool(a.Value)
+		case "acl_users":
+			s.cfg.ACLUsers = mergeACLValue(s.cfg.ACLUsers, a.Value, a.Op)
+		case "acl_roots":
+			s.cfg.ACLRoots = mergeACLValue(s.cfg.ACLRoots, a.Value, a.Op)
+		case "acl_logic_or":
+			s.cfg.ACLLogicOr = parseBool(a.Value)
+		case "acl_group_sloppy":
+			s.cfg.ACLGroupSloppy = parseBool(a.Value)
+		case "acl_user_hosts":
+			s.cfg.ACLUserHosts = mergeACLValue(s.cfg.ACLUserHosts, a.Value, a.Op)
+		case "acl_group_hosts":
+			s.cfg.ACLGroupHosts = mergeACLValue(s.cfg.ACLGroupHosts, a.Value, a.Op)
+		// Resource limits
+		case "max_running":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.MaxRunning)
+		case "max_user_run":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.MaxUserRun)
+		case "max_group_run":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.MaxGroupRun)
+		case "max_user_queuable":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.MaxUserQueuable)
+		case "resources_available":
+			if a.HasResc {
+				s.cfg.ResourcesAvail[a.Resc] = a.Value
+			}
+		case "resources_default":
+			if a.HasResc {
+				s.cfg.ResourcesDefault[a.Resc] = a.Value
+			}
+		case "resources_max":
+			if a.HasResc {
+				s.cfg.ResourcesMax[a.Resc] = a.Value
+			}
+		case "resources_cost":
+			if a.HasResc {
+				s.cfg.ResourcesCost[a.Resc] = a.Value
+			}
+		// Mail
+		case "mail_domain":
+			s.cfg.MailDomain = a.Value
+		case "mail_from":
+			s.cfg.MailFrom = a.Value
+		case "no_mail_force":
+			s.cfg.NoMailForce = parseBool(a.Value)
+		case "mail_subject_fmt":
+			s.cfg.MailSubjectFmt = a.Value
+		case "mail_body_fmt":
+			s.cfg.MailBodyFmt = a.Value
+		case "email_batch_seconds":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.EmailBatchSeconds)
+		// Node & job policy
+		case "default_node":
+			s.cfg.DefaultNode = a.Value
+		case "node_pack":
+			s.cfg.NodePack = parseBool(a.Value)
+		case "query_other_jobs":
+			s.cfg.QueryOtherJobs = parseBool(a.Value)
+		case "mom_job_sync":
+			s.cfg.MOMJobSync = parseBool(a.Value)
+		case "down_on_error":
+			s.cfg.DownOnError = parseBool(a.Value)
+		case "disable_server_id_check":
+			s.cfg.DisableServerIdCheck = parseBool(a.Value)
+		case "allow_node_submit":
+			s.cfg.AllowNodeSubmit = parseBool(a.Value)
+		case "allow_proxy_user":
+			s.cfg.AllowProxyUser = parseBool(a.Value)
+		case "auto_node_np":
+			s.cfg.AutoNodeNP = parseBool(a.Value)
+		case "np_default":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.NPDefault)
+		case "job_nanny":
+			s.cfg.JobNanny = parseBool(a.Value)
+		case "owner_purge":
+			s.cfg.OwnerPurge = parseBool(a.Value)
+		case "copy_on_rerun":
+			s.cfg.CopyOnRerun = parseBool(a.Value)
+		case "job_exclusive_on_use":
+			s.cfg.JobExclusiveOnUse = parseBool(a.Value)
+		case "disable_automatic_requeue":
+			s.cfg.DisableAutoRequeue = parseBool(a.Value)
+		case "automatic_requeue_exit_code":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.AutoRequeueExitCode)
+		case "dont_write_nodes_file":
+			s.cfg.DontWriteNodesFile = parseBool(a.Value)
+		// Job array & display
+		case "max_job_array_size":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.MaxJobArraySize)
+		case "max_slot_limit":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.MaxSlotLimit)
+		case "clone_batch_size":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.CloneBatchSize)
+		case "clone_batch_delay":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.CloneBatchDelay)
+		case "moab_array_compatible":
+			s.cfg.MoabArrayCompatible = parseBool(a.Value)
+		case "display_job_server_suffix":
+			s.cfg.DisplayJobServerSuffix = parseBool(a.Value)
+		case "job_suffix_alias":
+			s.cfg.JobSuffixAlias = a.Value
+		case "use_jobs_subdirs":
+			s.cfg.UseJobsSubdirs = parseBool(a.Value)
+		// Kill & cancel timeouts
+		case "kill_delay":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.KillDelay)
+		case "user_kill_delay":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.UserKillDelay)
+		case "exit_code_canceled_job":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.ExitCodeCanceledJob)
+		case "timeout_for_job_delete":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.TimeoutForJobDelete)
+		case "timeout_for_job_requeue":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.TimeoutForJobRequeue)
+		// Hardware
+		case "default_gpu_mode":
+			s.cfg.DefaultGpuMode = a.Value
+		case "idle_slot_limit":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.IdleSlotLimit)
+		case "cgroup_per_task":
+			s.cfg.CgroupPerTask = parseBool(a.Value)
+		case "pass_cpu_clock":
+			s.cfg.PassCpuClock = parseBool(a.Value)
+		// Other
+		case "submit_hosts":
+			s.cfg.SubmitHosts = mergeACLValue(s.cfg.SubmitHosts, a.Value, a.Op)
+		case "node_submit_exceptions":
+			s.cfg.NodeSubmitExceptions = a.Value
+		case "node_suffix":
+			s.cfg.NodeSuffix = a.Value
+		case "comment":
+			s.cfg.Comment = a.Value
+		case "lock_file_update_time":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.LockFileUpdateTime)
+		case "lock_file_check_time":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.LockFileCheckTime)
+		case "interactive_jobs_can_roam":
+			s.cfg.InteractiveJobsCanRoam = parseBool(a.Value)
+		case "legacy_vmem":
+			s.cfg.LegacyVmem = parseBool(a.Value)
+		case "ghost_array_recovery":
+			s.cfg.GhostArrayRecovery = parseBool(a.Value)
+		case "tcp_incoming_timeout":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.TCPIncomingTimeout)
+		case "job_full_report_time":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.JobFullReportTime)
+		default:
+			log.Printf("[SERVER] Unknown server attribute: %s", a.Name)
 		}
 	}
 	return nil
 }
 
+// parseBool handles True/true/1/False/false/0 boolean values.
+func parseBool(val string) bool {
+	return val == "True" || val == "true" || val == "1"
+}
+
+// mergeACLValue handles += (append) and = (replace) operations for ACL list attributes.
+// Op 7 is INCR (+=), other ops replace.
+func mergeACLValue(existing, newVal string, op int) string {
+	if op == 7 && existing != "" {
+		return existing + "," + newVal
+	}
+	return newVal
+}
+
 func (s *Server) mgrUnsetServer(attrs []dis.SvrAttrl) error {
-	// Reset to defaults - simplified
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	defaults := config.NewConfig(s.cfg.PBSHome)
+	for _, a := range attrs {
+		switch a.Name {
+		case "scheduling":
+			s.cfg.Scheduling = defaults.Scheduling
+		case "default_queue":
+			s.cfg.DefaultQueue = defaults.DefaultQueue
+		case "scheduler_iteration":
+			s.cfg.SchedulerIteration = defaults.SchedulerIteration
+		case "node_check_rate":
+			s.cfg.NodeCheckRate = defaults.NodeCheckRate
+		case "tcp_timeout":
+			s.cfg.TCPTimeout = defaults.TCPTimeout
+		case "keep_completed":
+			s.cfg.KeepCompleted = defaults.KeepCompleted
+		case "log_events":
+			s.cfg.LogLevel = defaults.LogLevel
+		case "job_stat_rate":
+			s.cfg.JobStatRate = 0
+		case "poll_jobs":
+			s.cfg.PollJobs = false
+		case "ping_rate":
+			s.cfg.PingRate = defaults.PingRate
+		case "job_start_timeout":
+			s.cfg.JobStartTimeout = defaults.JobStartTimeout
+		case "job_force_cancel_time":
+			s.cfg.JobForceCancelTime = 0
+		case "job_sync_timeout":
+			s.cfg.JobSyncTimeout = defaults.JobSyncTimeout
+		case "log_file_max_size":
+			s.cfg.LogFileMaxSize = 0
+		case "log_file_roll_depth":
+			s.cfg.LogFileRollDepth = defaults.LogFileRollDepth
+		case "log_keep_days":
+			s.cfg.LogKeepDays = 0
+		case "record_job_info":
+			s.cfg.RecordJobInfo = false
+		case "record_job_script":
+			s.cfg.RecordJobScript = false
+		case "managers":
+			s.cfg.Managers = ""
+		case "operators":
+			s.cfg.Operators = ""
+		case "acl_host_enable":
+			s.cfg.ACLHostEnable = false
+		case "acl_hosts":
+			s.cfg.ACLHosts = ""
+		case "acl_user_enable":
+			s.cfg.ACLUserEnable = false
+		case "acl_users":
+			s.cfg.ACLUsers = ""
+		case "max_running":
+			s.cfg.MaxRunning = 0
+		case "max_user_run":
+			s.cfg.MaxUserRun = 0
+		case "max_group_run":
+			s.cfg.MaxGroupRun = 0
+		case "max_user_queuable":
+			s.cfg.MaxUserQueuable = 0
+		case "resources_available":
+			if a.HasResc {
+				delete(s.cfg.ResourcesAvail, a.Resc)
+			}
+		case "resources_default":
+			if a.HasResc {
+				delete(s.cfg.ResourcesDefault, a.Resc)
+			}
+		case "resources_max":
+			if a.HasResc {
+				delete(s.cfg.ResourcesMax, a.Resc)
+			}
+		case "mail_domain":
+			s.cfg.MailDomain = ""
+		case "mail_from":
+			s.cfg.MailFrom = ""
+		case "default_node":
+			s.cfg.DefaultNode = ""
+		case "node_pack":
+			s.cfg.NodePack = false
+		case "query_other_jobs":
+			s.cfg.QueryOtherJobs = defaults.QueryOtherJobs
+		case "mom_job_sync":
+			s.cfg.MOMJobSync = defaults.MOMJobSync
+		case "kill_delay":
+			s.cfg.KillDelay = defaults.KillDelay
+		case "max_job_array_size":
+			s.cfg.MaxJobArraySize = defaults.MaxJobArraySize
+		case "comment":
+			s.cfg.Comment = ""
+		case "display_job_server_suffix":
+			s.cfg.DisplayJobServerSuffix = defaults.DisplayJobServerSuffix
+		}
+	}
 	return nil
 }
 
@@ -1710,29 +2025,299 @@ func (s *Server) formatServerStatus() dis.StatusObject {
 	add := func(name, value string) {
 		attrs = append(attrs, dis.SvrAttrl{Name: name, Value: value, Op: 1})
 	}
+	addBool := func(name string, val bool) {
+		if val {
+			add(name, "True")
+		} else {
+			add(name, "False")
+		}
+	}
+	addInt := func(name string, val int) {
+		add(name, strconv.Itoa(val))
+	}
+	// Only report non-zero int values
+	addIntNZ := func(name string, val int) {
+		if val != 0 {
+			add(name, strconv.Itoa(val))
+		}
+	}
+	addStr := func(name, val string) {
+		if val != "" {
+			add(name, val)
+		}
+	}
+	addResc := func(name string, m map[string]string) {
+		for k, v := range m {
+			attrs = append(attrs, dis.SvrAttrl{Name: name, HasResc: true, Resc: k, Value: v, Op: 1})
+		}
+	}
 
+	// Core
 	add("server_name", s.cfg.ServerName)
 	add("server_host", s.cfg.ServerName)
 	add("pbs_version", "7.0.0-go")
 	add("server_state", "Active")
-	if s.cfg.Scheduling {
-		add("scheduling", "True")
-	} else {
-		add("scheduling", "False")
-	}
+	addBool("scheduling", s.cfg.Scheduling)
 	add("total_jobs", strconv.Itoa(s.jobMgr.JobCount()))
 	add("state_count", fmt.Sprintf("Transit:%d Queued:%d Held:%d Waiting:%d Running:%d Exiting:%d Complete:%d",
 		s.jobMgr.StateCount(0), s.jobMgr.StateCount(1), s.jobMgr.StateCount(2),
 		s.jobMgr.StateCount(3), s.jobMgr.StateCount(4), s.jobMgr.StateCount(5),
 		s.jobMgr.StateCount(6)))
 	add("default_queue", s.cfg.DefaultQueue)
-	add("scheduler_iteration", strconv.Itoa(s.cfg.SchedulerIteration))
-	add("node_check_rate", strconv.Itoa(s.cfg.NodeCheckRate))
-	add("tcp_timeout", strconv.Itoa(s.cfg.TCPTimeout))
-	add("keep_completed", strconv.Itoa(s.cfg.KeepCompleted))
+
+	// Scheduling & timing
+	addInt("scheduler_iteration", s.cfg.SchedulerIteration)
+	addInt("node_check_rate", s.cfg.NodeCheckRate)
+	addInt("tcp_timeout", s.cfg.TCPTimeout)
+	addInt("keep_completed", s.cfg.KeepCompleted)
+	addIntNZ("job_stat_rate", s.cfg.JobStatRate)
+	if s.cfg.PollJobs {
+		addBool("poll_jobs", true)
+	}
+	addInt("ping_rate", s.cfg.PingRate)
+	addInt("job_start_timeout", s.cfg.JobStartTimeout)
+	addIntNZ("job_force_cancel_time", s.cfg.JobForceCancelTime)
+	addInt("job_sync_timeout", s.cfg.JobSyncTimeout)
 	add("next_job_number", strconv.Itoa(s.jobMgr.GetNextJobIDNum()))
 
+	// Logging
+	addInt("log_events", s.cfg.LogLevel)
+	addIntNZ("log_file_max_size", s.cfg.LogFileMaxSize)
+	addInt("log_file_roll_depth", s.cfg.LogFileRollDepth)
+	addIntNZ("log_keep_days", s.cfg.LogKeepDays)
+	if s.cfg.RecordJobInfo {
+		addBool("record_job_info", true)
+	}
+	if s.cfg.RecordJobScript {
+		addBool("record_job_script", true)
+	}
+	addIntNZ("job_log_file_max_size", s.cfg.JobLogFileMaxSize)
+	addIntNZ("job_log_file_roll_depth", s.cfg.JobLogFileRollDepth)
+	addIntNZ("job_log_keep_days", s.cfg.JobLogKeepDays)
+
+	// ACL
+	addStr("managers", s.cfg.Managers)
+	addStr("operators", s.cfg.Operators)
+	if s.cfg.ACLHostEnable {
+		addBool("acl_host_enable", true)
+	}
+	addStr("acl_hosts", s.cfg.ACLHosts)
+	if s.cfg.ACLUserEnable {
+		addBool("acl_user_enable", true)
+	}
+	addStr("acl_users", s.cfg.ACLUsers)
+	addStr("acl_roots", s.cfg.ACLRoots)
+	if s.cfg.ACLLogicOr {
+		addBool("acl_logic_or", true)
+	}
+	if s.cfg.ACLGroupSloppy {
+		addBool("acl_group_sloppy", true)
+	}
+	addStr("acl_user_hosts", s.cfg.ACLUserHosts)
+	addStr("acl_group_hosts", s.cfg.ACLGroupHosts)
+
+	// Resource limits
+	addIntNZ("max_running", s.cfg.MaxRunning)
+	addIntNZ("max_user_run", s.cfg.MaxUserRun)
+	addIntNZ("max_group_run", s.cfg.MaxGroupRun)
+	addIntNZ("max_user_queuable", s.cfg.MaxUserQueuable)
+	addResc("resources_available", s.cfg.ResourcesAvail)
+	addResc("resources_default", s.cfg.ResourcesDefault)
+	addResc("resources_max", s.cfg.ResourcesMax)
+	addResc("resources_cost", s.cfg.ResourcesCost)
+
+	// Mail
+	addStr("mail_domain", s.cfg.MailDomain)
+	addStr("mail_from", s.cfg.MailFrom)
+	if s.cfg.NoMailForce {
+		addBool("no_mail_force", true)
+	}
+	addStr("mail_subject_fmt", s.cfg.MailSubjectFmt)
+	addStr("mail_body_fmt", s.cfg.MailBodyFmt)
+	addIntNZ("email_batch_seconds", s.cfg.EmailBatchSeconds)
+
+	// Node & job policy
+	addStr("default_node", s.cfg.DefaultNode)
+	if s.cfg.NodePack {
+		addBool("node_pack", true)
+	}
+	addBool("query_other_jobs", s.cfg.QueryOtherJobs)
+	addBool("mom_job_sync", s.cfg.MOMJobSync)
+	if s.cfg.DownOnError {
+		addBool("down_on_error", true)
+	}
+	if s.cfg.DisableServerIdCheck {
+		addBool("disable_server_id_check", true)
+	}
+	if s.cfg.AllowNodeSubmit {
+		addBool("allow_node_submit", true)
+	}
+	if s.cfg.AllowProxyUser {
+		addBool("allow_proxy_user", true)
+	}
+	if s.cfg.AutoNodeNP {
+		addBool("auto_node_np", true)
+	}
+	addIntNZ("np_default", s.cfg.NPDefault)
+	if s.cfg.JobNanny {
+		addBool("job_nanny", true)
+	}
+	if s.cfg.OwnerPurge {
+		addBool("owner_purge", true)
+	}
+	if s.cfg.CopyOnRerun {
+		addBool("copy_on_rerun", true)
+	}
+	if s.cfg.JobExclusiveOnUse {
+		addBool("job_exclusive_on_use", true)
+	}
+	if s.cfg.DisableAutoRequeue {
+		addBool("disable_automatic_requeue", true)
+	}
+	if s.cfg.AutoRequeueExitCode >= 0 {
+		addInt("automatic_requeue_exit_code", s.cfg.AutoRequeueExitCode)
+	}
+	if s.cfg.DontWriteNodesFile {
+		addBool("dont_write_nodes_file", true)
+	}
+
+	// Job array & display
+	addInt("max_job_array_size", s.cfg.MaxJobArraySize)
+	addIntNZ("max_slot_limit", s.cfg.MaxSlotLimit)
+	addInt("clone_batch_size", s.cfg.CloneBatchSize)
+	addInt("clone_batch_delay", s.cfg.CloneBatchDelay)
+	if s.cfg.MoabArrayCompatible {
+		addBool("moab_array_compatible", true)
+	}
+	addBool("display_job_server_suffix", s.cfg.DisplayJobServerSuffix)
+	addStr("job_suffix_alias", s.cfg.JobSuffixAlias)
+	if s.cfg.UseJobsSubdirs {
+		addBool("use_jobs_subdirs", true)
+	}
+
+	// Kill & cancel timeouts
+	addInt("kill_delay", s.cfg.KillDelay)
+	addIntNZ("user_kill_delay", s.cfg.UserKillDelay)
+	addInt("exit_code_canceled_job", s.cfg.ExitCodeCanceledJob)
+	addInt("timeout_for_job_delete", s.cfg.TimeoutForJobDelete)
+	addInt("timeout_for_job_requeue", s.cfg.TimeoutForJobRequeue)
+
+	// Hardware
+	addStr("default_gpu_mode", s.cfg.DefaultGpuMode)
+	addIntNZ("idle_slot_limit", s.cfg.IdleSlotLimit)
+	if s.cfg.CgroupPerTask {
+		addBool("cgroup_per_task", true)
+	}
+	if s.cfg.PassCpuClock {
+		addBool("pass_cpu_clock", true)
+	}
+
+	// Other
+	addStr("submit_hosts", s.cfg.SubmitHosts)
+	addStr("node_submit_exceptions", s.cfg.NodeSubmitExceptions)
+	addStr("node_suffix", s.cfg.NodeSuffix)
+	addStr("comment", s.cfg.Comment)
+	addIntNZ("lock_file_update_time", s.cfg.LockFileUpdateTime)
+	addIntNZ("lock_file_check_time", s.cfg.LockFileCheckTime)
+	if s.cfg.InteractiveJobsCanRoam {
+		addBool("interactive_jobs_can_roam", true)
+	}
+	if s.cfg.LegacyVmem {
+		addBool("legacy_vmem", true)
+	}
+	if s.cfg.GhostArrayRecovery {
+		addBool("ghost_array_recovery", true)
+	}
+	addIntNZ("tcp_incoming_timeout", s.cfg.TCPIncomingTimeout)
+	addIntNZ("job_full_report_time", s.cfg.JobFullReportTime)
+
 	return dis.StatusObject{Type: dis.MgrObjServer, Name: s.cfg.ServerName, Attrs: attrs}
+}
+
+// --- Enforcement Hooks ---
+
+// enforceSubmitLimits checks ACLs and resource limits before accepting a job.
+func (s *Server) enforceSubmitLimits(j *job.Job, user string) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Check user ACL: if acl_user_enable is set, only listed users may submit
+	if s.cfg.ACLUserEnable && s.cfg.ACLUsers != "" {
+		if !aclContains(s.cfg.ACLUsers, extractUser(user)) {
+			return fmt.Errorf("user %s not in acl_users", user)
+		}
+	}
+
+	// Check max_user_queuable: limit number of queued jobs per user
+	if s.cfg.MaxUserQueuable > 0 {
+		count := s.jobMgr.CountJobsByOwner(user)
+		if count >= s.cfg.MaxUserQueuable {
+			return fmt.Errorf("user %s exceeds max_user_queuable (%d)", user, s.cfg.MaxUserQueuable)
+		}
+	}
+
+	return nil
+}
+
+// enforceRunLimits checks if a job is allowed to run based on server limits.
+// Returns true if the job may be dispatched.
+func (s *Server) enforceRunLimits(j *job.Job) bool {
+	// Check server-wide max_running by counting actual running jobs
+	if s.cfg.MaxRunning > 0 {
+		running := s.jobMgr.CountByState(job.StateRunning)
+		if running >= s.cfg.MaxRunning {
+			log.Printf("[LIMIT] Job %s blocked: max_running=%d, running=%d", j.ID, s.cfg.MaxRunning, running)
+			return false
+		}
+	}
+
+	j.Mu.RLock()
+	owner := j.Owner
+	group := j.EGroup
+	j.Mu.RUnlock()
+
+	// Check per-user max_user_run
+	if s.cfg.MaxUserRun > 0 {
+		count := s.jobMgr.CountRunningByOwner(owner)
+		if count >= s.cfg.MaxUserRun {
+			log.Printf("[LIMIT] Job %s blocked: max_user_run=%d, user %s running=%d", j.ID, s.cfg.MaxUserRun, owner, count)
+			return false
+		}
+	}
+
+	// Check per-group max_group_run
+	if s.cfg.MaxGroupRun > 0 && group != "" {
+		count := s.jobMgr.CountRunningByGroup(group)
+		if count >= s.cfg.MaxGroupRun {
+			log.Printf("[LIMIT] Job %s blocked: max_group_run=%d, group %s running=%d", j.ID, s.cfg.MaxGroupRun, group, count)
+			return false
+		}
+	}
+
+	return true
+}
+
+// aclContains checks if a user is in a comma-separated ACL list.
+// Supports both "user" and "user@host" entries.
+func aclContains(aclList, user string) bool {
+	for _, entry := range strings.Split(aclList, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if entry == user || extractUser(entry) == user {
+			return true
+		}
+	}
+	return false
+}
+
+// extractUser returns the username part from "user@host" or just "user".
+func extractUser(s string) string {
+	if idx := strings.Index(s, "@"); idx >= 0 {
+		return s[:idx]
+	}
+	return s
 }
 
 // --- Attribute Application Helpers ---
@@ -1954,6 +2539,11 @@ func (s *Server) scheduleJob(j *job.Job) {
 	}
 	j.Mu.RUnlock()
 
+	// Check server-wide and per-user/group run limits
+	if !s.enforceRunLimits(j) {
+		return // Limits exceeded, try again next cycle
+	}
+
 	// Find a node with available slots
 	neededSlots := 1
 	n, slots := s.nodeMgr.FindNodeForJob(neededSlots)
@@ -1973,9 +2563,11 @@ func (s *Server) scheduleJob(j *job.Job) {
 	j.ExecHost = execHost
 	j.ExecPort = momPort
 	oldState := j.State
-	j.SetState(job.StateRunning, job.SubstateRunning)
 	queueName := j.Queue
 	j.Mu.Unlock()
+
+	// Use manager's UpdateJobState to keep stateCounts in sync
+	s.jobMgr.UpdateJobState(j.ID, job.StateRunning, job.SubstateRunning)
 
 	// Update queue counters
 	if q := s.queueMgr.GetQueue(queueName); q != nil {
@@ -2403,51 +2995,306 @@ func (s *Server) recoverServerDB() {
 
 	content := string(data)
 
-	// Detect XML format (used by C pbs_server)
-	if strings.Contains(content, "<server_db>") {
+	// Detect XML format (used by both C pbs_server and Go save)
+	if strings.Contains(content, "<server_db>") || strings.Contains(content, "<nextjobid>") {
 		s.recoverServerDBXML(content)
 		return
 	}
 
-	// Simple line-based format: key=value (Go format)
+	// Legacy simple line-based format: key=value
 	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)
 		if idx := strings.Index(line, "="); idx > 0 {
 			key := line[:idx]
 			val := line[idx+1:]
-			switch key {
-			case "next_job_id":
-				if n, err := strconv.Atoi(val); err == nil {
-					s.jobMgr.SetNextJobIDNum(n)
-					log.Printf("[SERVER] Recovered next_job_id=%d", n)
-				}
-			case "default_queue":
-				s.cfg.DefaultQueue = val
-			case "scheduling":
-				s.cfg.Scheduling = (val == "true")
-			case "keep_completed":
-				fmt.Sscanf(val, "%d", &s.cfg.KeepCompleted)
-			}
+			s.applyServerDBAttr(key, val)
 		}
 	}
 }
 
-// recoverServerDBXML parses the C pbs_server XML serverdb format.
+// recoverServerDBXML parses the XML serverdb format.
 func (s *Server) recoverServerDBXML(content string) {
-	// Extract nextjobid from <nextjobid>N</nextjobid>
-	if val := extractXMLTag(content, "nextjobid"); val != "" {
-		if n, err := strconv.Atoi(val); err == nil {
-			s.jobMgr.SetNextJobIDNum(n)
-			log.Printf("[SERVER] Recovered next_job_id=%d (from XML)", n)
+	// Parse all known XML tags
+	xmlAttrs := map[string]string{
+		"nextjobid": "", "default_queue": "", "scheduling": "",
+		"scheduler_iteration": "", "node_check_rate": "", "tcp_timeout": "",
+		"keep_completed": "", "job_stat_rate": "", "poll_jobs": "",
+		"ping_rate": "", "job_start_timeout": "", "job_force_cancel_time": "",
+		"job_sync_timeout": "", "log_events": "", "log_file_max_size": "",
+		"log_file_roll_depth": "", "log_keep_days": "", "record_job_info": "",
+		"record_job_script": "", "job_log_file_max_size": "",
+		"job_log_file_roll_depth": "", "job_log_keep_days": "",
+		"managers": "", "operators": "", "acl_host_enable": "", "acl_hosts": "",
+		"acl_user_enable": "", "acl_users": "", "acl_roots": "",
+		"acl_logic_or": "", "acl_group_sloppy": "",
+		"acl_user_hosts": "", "acl_group_hosts": "",
+		"max_running": "", "max_user_run": "", "max_group_run": "",
+		"max_user_queuable": "",
+		"mail_domain": "", "mail_from": "", "no_mail_force": "",
+		"mail_subject_fmt": "", "mail_body_fmt": "", "email_batch_seconds": "",
+		"default_node": "", "node_pack": "", "query_other_jobs": "",
+		"mom_job_sync": "", "down_on_error": "", "disable_server_id_check": "",
+		"allow_node_submit": "", "allow_proxy_user": "", "auto_node_np": "",
+		"np_default": "", "job_nanny": "", "owner_purge": "",
+		"copy_on_rerun": "", "job_exclusive_on_use": "",
+		"disable_automatic_requeue": "", "automatic_requeue_exit_code": "",
+		"dont_write_nodes_file": "",
+		"max_job_array_size": "", "max_slot_limit": "",
+		"clone_batch_size": "", "clone_batch_delay": "",
+		"moab_array_compatible": "", "display_job_server_suffix": "",
+		"job_suffix_alias": "", "use_jobs_subdirs": "",
+		"kill_delay": "", "user_kill_delay": "", "exit_code_canceled_job": "",
+		"timeout_for_job_delete": "", "timeout_for_job_requeue": "",
+		"default_gpu_mode": "", "idle_slot_limit": "",
+		"cgroup_per_task": "", "pass_cpu_clock": "",
+		"submit_hosts": "", "node_submit_exceptions": "", "node_suffix": "",
+		"comment": "", "lock_file_update_time": "", "lock_file_check_time": "",
+		"interactive_jobs_can_roam": "", "legacy_vmem": "",
+		"ghost_array_recovery": "", "tcp_incoming_timeout": "",
+		"job_full_report_time": "",
+	}
+
+	for tag := range xmlAttrs {
+		if val := extractXMLTag(content, tag); val != "" {
+			s.applyServerDBAttr(tag, val)
 		}
 	}
-	// Extract scheduling flag
-	if val := extractXMLTag(content, "scheduling"); val != "" {
-		s.cfg.Scheduling = (val == "true")
+
+	// Parse resource map tags: <resources_available.mem>4gb</resources_available.mem>
+	rescMaps := map[string]*map[string]string{
+		"resources_available": &s.cfg.ResourcesAvail,
+		"resources_default":  &s.cfg.ResourcesDefault,
+		"resources_max":      &s.cfg.ResourcesMax,
+		"resources_cost":     &s.cfg.ResourcesCost,
 	}
-	// Extract default queue
-	if val := extractXMLTag(content, "default_queue"); val != "" {
+	for prefix, m := range rescMaps {
+		parseResourceMapXML(content, prefix, *m)
+	}
+}
+
+// parseResourceMapXML extracts resource map entries like <resources_available.mem>4gb</...>
+func parseResourceMapXML(content, prefix string, m map[string]string) {
+	search := "<" + prefix + "."
+	pos := 0
+	for {
+		idx := strings.Index(content[pos:], search)
+		if idx < 0 {
+			break
+		}
+		idx += pos
+		tagStart := idx + 1
+		tagEnd := strings.Index(content[tagStart:], ">")
+		if tagEnd < 0 {
+			break
+		}
+		tagEnd += tagStart
+		fullTag := content[tagStart:tagEnd]
+		resc := strings.TrimPrefix(fullTag, prefix+".")
+		closeTag := "</" + fullTag + ">"
+		valStart := tagEnd + 1
+		closeIdx := strings.Index(content[valStart:], closeTag)
+		if closeIdx < 0 {
+			break
+		}
+		val := strings.TrimSpace(content[valStart : valStart+closeIdx])
+		m[resc] = val
+		pos = valStart + closeIdx + len(closeTag)
+	}
+}
+
+// applyServerDBAttr sets a server config attribute from a key-value pair.
+func (s *Server) applyServerDBAttr(key, val string) {
+	switch key {
+	// Core
+	case "nextjobid", "next_job_id":
+		if n, err := strconv.Atoi(val); err == nil {
+			s.jobMgr.SetNextJobIDNum(n)
+			log.Printf("[SERVER] Recovered next_job_id=%d", n)
+		}
+	case "default_queue":
 		s.cfg.DefaultQueue = val
+	case "scheduling":
+		s.cfg.Scheduling = parseBool(val)
+	// Scheduling & timing
+	case "scheduler_iteration":
+		fmt.Sscanf(val, "%d", &s.cfg.SchedulerIteration)
+	case "node_check_rate":
+		fmt.Sscanf(val, "%d", &s.cfg.NodeCheckRate)
+	case "tcp_timeout":
+		fmt.Sscanf(val, "%d", &s.cfg.TCPTimeout)
+	case "keep_completed":
+		fmt.Sscanf(val, "%d", &s.cfg.KeepCompleted)
+	case "job_stat_rate":
+		fmt.Sscanf(val, "%d", &s.cfg.JobStatRate)
+	case "poll_jobs":
+		s.cfg.PollJobs = parseBool(val)
+	case "ping_rate":
+		fmt.Sscanf(val, "%d", &s.cfg.PingRate)
+	case "job_start_timeout":
+		fmt.Sscanf(val, "%d", &s.cfg.JobStartTimeout)
+	case "job_force_cancel_time":
+		fmt.Sscanf(val, "%d", &s.cfg.JobForceCancelTime)
+	case "job_sync_timeout":
+		fmt.Sscanf(val, "%d", &s.cfg.JobSyncTimeout)
+	// Logging
+	case "log_events":
+		fmt.Sscanf(val, "%d", &s.cfg.LogLevel)
+	case "log_file_max_size":
+		fmt.Sscanf(val, "%d", &s.cfg.LogFileMaxSize)
+	case "log_file_roll_depth":
+		fmt.Sscanf(val, "%d", &s.cfg.LogFileRollDepth)
+	case "log_keep_days":
+		fmt.Sscanf(val, "%d", &s.cfg.LogKeepDays)
+	case "record_job_info":
+		s.cfg.RecordJobInfo = parseBool(val)
+	case "record_job_script":
+		s.cfg.RecordJobScript = parseBool(val)
+	case "job_log_file_max_size":
+		fmt.Sscanf(val, "%d", &s.cfg.JobLogFileMaxSize)
+	case "job_log_file_roll_depth":
+		fmt.Sscanf(val, "%d", &s.cfg.JobLogFileRollDepth)
+	case "job_log_keep_days":
+		fmt.Sscanf(val, "%d", &s.cfg.JobLogKeepDays)
+	// ACL
+	case "managers":
+		s.cfg.Managers = val
+	case "operators":
+		s.cfg.Operators = val
+	case "acl_host_enable":
+		s.cfg.ACLHostEnable = parseBool(val)
+	case "acl_hosts":
+		s.cfg.ACLHosts = val
+	case "acl_user_enable":
+		s.cfg.ACLUserEnable = parseBool(val)
+	case "acl_users":
+		s.cfg.ACLUsers = val
+	case "acl_roots":
+		s.cfg.ACLRoots = val
+	case "acl_logic_or":
+		s.cfg.ACLLogicOr = parseBool(val)
+	case "acl_group_sloppy":
+		s.cfg.ACLGroupSloppy = parseBool(val)
+	case "acl_user_hosts":
+		s.cfg.ACLUserHosts = val
+	case "acl_group_hosts":
+		s.cfg.ACLGroupHosts = val
+	// Resource limits
+	case "max_running":
+		fmt.Sscanf(val, "%d", &s.cfg.MaxRunning)
+	case "max_user_run":
+		fmt.Sscanf(val, "%d", &s.cfg.MaxUserRun)
+	case "max_group_run":
+		fmt.Sscanf(val, "%d", &s.cfg.MaxGroupRun)
+	case "max_user_queuable":
+		fmt.Sscanf(val, "%d", &s.cfg.MaxUserQueuable)
+	// Mail
+	case "mail_domain":
+		s.cfg.MailDomain = val
+	case "mail_from":
+		s.cfg.MailFrom = val
+	case "no_mail_force":
+		s.cfg.NoMailForce = parseBool(val)
+	case "mail_subject_fmt":
+		s.cfg.MailSubjectFmt = val
+	case "mail_body_fmt":
+		s.cfg.MailBodyFmt = val
+	case "email_batch_seconds":
+		fmt.Sscanf(val, "%d", &s.cfg.EmailBatchSeconds)
+	// Node & job policy
+	case "default_node":
+		s.cfg.DefaultNode = val
+	case "node_pack":
+		s.cfg.NodePack = parseBool(val)
+	case "query_other_jobs":
+		s.cfg.QueryOtherJobs = parseBool(val)
+	case "mom_job_sync":
+		s.cfg.MOMJobSync = parseBool(val)
+	case "down_on_error":
+		s.cfg.DownOnError = parseBool(val)
+	case "disable_server_id_check":
+		s.cfg.DisableServerIdCheck = parseBool(val)
+	case "allow_node_submit":
+		s.cfg.AllowNodeSubmit = parseBool(val)
+	case "allow_proxy_user":
+		s.cfg.AllowProxyUser = parseBool(val)
+	case "auto_node_np":
+		s.cfg.AutoNodeNP = parseBool(val)
+	case "np_default":
+		fmt.Sscanf(val, "%d", &s.cfg.NPDefault)
+	case "job_nanny":
+		s.cfg.JobNanny = parseBool(val)
+	case "owner_purge":
+		s.cfg.OwnerPurge = parseBool(val)
+	case "copy_on_rerun":
+		s.cfg.CopyOnRerun = parseBool(val)
+	case "job_exclusive_on_use":
+		s.cfg.JobExclusiveOnUse = parseBool(val)
+	case "disable_automatic_requeue":
+		s.cfg.DisableAutoRequeue = parseBool(val)
+	case "automatic_requeue_exit_code":
+		fmt.Sscanf(val, "%d", &s.cfg.AutoRequeueExitCode)
+	case "dont_write_nodes_file":
+		s.cfg.DontWriteNodesFile = parseBool(val)
+	// Job array & display
+	case "max_job_array_size":
+		fmt.Sscanf(val, "%d", &s.cfg.MaxJobArraySize)
+	case "max_slot_limit":
+		fmt.Sscanf(val, "%d", &s.cfg.MaxSlotLimit)
+	case "clone_batch_size":
+		fmt.Sscanf(val, "%d", &s.cfg.CloneBatchSize)
+	case "clone_batch_delay":
+		fmt.Sscanf(val, "%d", &s.cfg.CloneBatchDelay)
+	case "moab_array_compatible":
+		s.cfg.MoabArrayCompatible = parseBool(val)
+	case "display_job_server_suffix":
+		s.cfg.DisplayJobServerSuffix = parseBool(val)
+	case "job_suffix_alias":
+		s.cfg.JobSuffixAlias = val
+	case "use_jobs_subdirs":
+		s.cfg.UseJobsSubdirs = parseBool(val)
+	// Kill & cancel timeouts
+	case "kill_delay":
+		fmt.Sscanf(val, "%d", &s.cfg.KillDelay)
+	case "user_kill_delay":
+		fmt.Sscanf(val, "%d", &s.cfg.UserKillDelay)
+	case "exit_code_canceled_job":
+		fmt.Sscanf(val, "%d", &s.cfg.ExitCodeCanceledJob)
+	case "timeout_for_job_delete":
+		fmt.Sscanf(val, "%d", &s.cfg.TimeoutForJobDelete)
+	case "timeout_for_job_requeue":
+		fmt.Sscanf(val, "%d", &s.cfg.TimeoutForJobRequeue)
+	// Hardware
+	case "default_gpu_mode":
+		s.cfg.DefaultGpuMode = val
+	case "idle_slot_limit":
+		fmt.Sscanf(val, "%d", &s.cfg.IdleSlotLimit)
+	case "cgroup_per_task":
+		s.cfg.CgroupPerTask = parseBool(val)
+	case "pass_cpu_clock":
+		s.cfg.PassCpuClock = parseBool(val)
+	// Other
+	case "submit_hosts":
+		s.cfg.SubmitHosts = val
+	case "node_submit_exceptions":
+		s.cfg.NodeSubmitExceptions = val
+	case "node_suffix":
+		s.cfg.NodeSuffix = val
+	case "comment":
+		s.cfg.Comment = val
+	case "lock_file_update_time":
+		fmt.Sscanf(val, "%d", &s.cfg.LockFileUpdateTime)
+	case "lock_file_check_time":
+		fmt.Sscanf(val, "%d", &s.cfg.LockFileCheckTime)
+	case "interactive_jobs_can_roam":
+		s.cfg.InteractiveJobsCanRoam = parseBool(val)
+	case "legacy_vmem":
+		s.cfg.LegacyVmem = parseBool(val)
+	case "ghost_array_recovery":
+		s.cfg.GhostArrayRecovery = parseBool(val)
+	case "tcp_incoming_timeout":
+		fmt.Sscanf(val, "%d", &s.cfg.TCPIncomingTimeout)
+	case "job_full_report_time":
+		fmt.Sscanf(val, "%d", &s.cfg.JobFullReportTime)
 	}
 }
 
@@ -2632,11 +3479,153 @@ func (s *Server) saveState() {
 
 // saveServerDB writes the server database file.
 func (s *Server) saveServerDB() {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("next_job_id=%d\n", s.jobMgr.GetNextJobIDNum()))
-	sb.WriteString(fmt.Sprintf("default_queue=%s\n", s.cfg.DefaultQueue))
-	sb.WriteString(fmt.Sprintf("scheduling=%v\n", s.cfg.Scheduling))
-	sb.WriteString(fmt.Sprintf("keep_completed=%d\n", s.cfg.KeepCompleted))
+	sb.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
+	sb.WriteString("<server_db>\n")
+
+	// Helper to write a single XML element
+	writeTag := func(tag, value string) {
+		sb.WriteString(fmt.Sprintf("  <%s>%s</%s>\n", tag, value, tag))
+	}
+	writeBool := func(tag string, val bool) {
+		if val {
+			writeTag(tag, "True")
+		} else {
+			writeTag(tag, "False")
+		}
+	}
+	writeInt := func(tag string, val int) {
+		writeTag(tag, strconv.Itoa(val))
+	}
+	writeStr := func(tag, val string) {
+		if val != "" {
+			writeTag(tag, val)
+		}
+	}
+	writeMap := func(tag string, m map[string]string) {
+		for k, v := range m {
+			sb.WriteString(fmt.Sprintf("  <%s.%s>%s</%s.%s>\n", tag, k, v, tag, k))
+		}
+	}
+
+	// Core
+	writeInt("nextjobid", s.jobMgr.GetNextJobIDNum())
+	writeStr("default_queue", s.cfg.DefaultQueue)
+	writeBool("scheduling", s.cfg.Scheduling)
+
+	// Scheduling & timing
+	writeInt("scheduler_iteration", s.cfg.SchedulerIteration)
+	writeInt("node_check_rate", s.cfg.NodeCheckRate)
+	writeInt("tcp_timeout", s.cfg.TCPTimeout)
+	writeInt("keep_completed", s.cfg.KeepCompleted)
+	writeInt("job_stat_rate", s.cfg.JobStatRate)
+	writeBool("poll_jobs", s.cfg.PollJobs)
+	writeInt("ping_rate", s.cfg.PingRate)
+	writeInt("job_start_timeout", s.cfg.JobStartTimeout)
+	writeInt("job_force_cancel_time", s.cfg.JobForceCancelTime)
+	writeInt("job_sync_timeout", s.cfg.JobSyncTimeout)
+
+	// Logging
+	writeInt("log_events", s.cfg.LogLevel)
+	writeInt("log_file_max_size", s.cfg.LogFileMaxSize)
+	writeInt("log_file_roll_depth", s.cfg.LogFileRollDepth)
+	writeInt("log_keep_days", s.cfg.LogKeepDays)
+	writeBool("record_job_info", s.cfg.RecordJobInfo)
+	writeBool("record_job_script", s.cfg.RecordJobScript)
+	writeInt("job_log_file_max_size", s.cfg.JobLogFileMaxSize)
+	writeInt("job_log_file_roll_depth", s.cfg.JobLogFileRollDepth)
+	writeInt("job_log_keep_days", s.cfg.JobLogKeepDays)
+
+	// ACL
+	writeStr("managers", s.cfg.Managers)
+	writeStr("operators", s.cfg.Operators)
+	writeBool("acl_host_enable", s.cfg.ACLHostEnable)
+	writeStr("acl_hosts", s.cfg.ACLHosts)
+	writeBool("acl_user_enable", s.cfg.ACLUserEnable)
+	writeStr("acl_users", s.cfg.ACLUsers)
+	writeStr("acl_roots", s.cfg.ACLRoots)
+	writeBool("acl_logic_or", s.cfg.ACLLogicOr)
+	writeBool("acl_group_sloppy", s.cfg.ACLGroupSloppy)
+	writeStr("acl_user_hosts", s.cfg.ACLUserHosts)
+	writeStr("acl_group_hosts", s.cfg.ACLGroupHosts)
+
+	// Resource limits
+	writeInt("max_running", s.cfg.MaxRunning)
+	writeInt("max_user_run", s.cfg.MaxUserRun)
+	writeInt("max_group_run", s.cfg.MaxGroupRun)
+	writeInt("max_user_queuable", s.cfg.MaxUserQueuable)
+	writeMap("resources_available", s.cfg.ResourcesAvail)
+	writeMap("resources_default", s.cfg.ResourcesDefault)
+	writeMap("resources_max", s.cfg.ResourcesMax)
+	writeMap("resources_cost", s.cfg.ResourcesCost)
+
+	// Mail
+	writeStr("mail_domain", s.cfg.MailDomain)
+	writeStr("mail_from", s.cfg.MailFrom)
+	writeBool("no_mail_force", s.cfg.NoMailForce)
+	writeStr("mail_subject_fmt", s.cfg.MailSubjectFmt)
+	writeStr("mail_body_fmt", s.cfg.MailBodyFmt)
+	writeInt("email_batch_seconds", s.cfg.EmailBatchSeconds)
+
+	// Node & job policy
+	writeStr("default_node", s.cfg.DefaultNode)
+	writeBool("node_pack", s.cfg.NodePack)
+	writeBool("query_other_jobs", s.cfg.QueryOtherJobs)
+	writeBool("mom_job_sync", s.cfg.MOMJobSync)
+	writeBool("down_on_error", s.cfg.DownOnError)
+	writeBool("disable_server_id_check", s.cfg.DisableServerIdCheck)
+	writeBool("allow_node_submit", s.cfg.AllowNodeSubmit)
+	writeBool("allow_proxy_user", s.cfg.AllowProxyUser)
+	writeBool("auto_node_np", s.cfg.AutoNodeNP)
+	writeInt("np_default", s.cfg.NPDefault)
+	writeBool("job_nanny", s.cfg.JobNanny)
+	writeBool("owner_purge", s.cfg.OwnerPurge)
+	writeBool("copy_on_rerun", s.cfg.CopyOnRerun)
+	writeBool("job_exclusive_on_use", s.cfg.JobExclusiveOnUse)
+	writeBool("disable_automatic_requeue", s.cfg.DisableAutoRequeue)
+	writeInt("automatic_requeue_exit_code", s.cfg.AutoRequeueExitCode)
+	writeBool("dont_write_nodes_file", s.cfg.DontWriteNodesFile)
+
+	// Job array & display
+	writeInt("max_job_array_size", s.cfg.MaxJobArraySize)
+	writeInt("max_slot_limit", s.cfg.MaxSlotLimit)
+	writeInt("clone_batch_size", s.cfg.CloneBatchSize)
+	writeInt("clone_batch_delay", s.cfg.CloneBatchDelay)
+	writeBool("moab_array_compatible", s.cfg.MoabArrayCompatible)
+	writeBool("display_job_server_suffix", s.cfg.DisplayJobServerSuffix)
+	writeStr("job_suffix_alias", s.cfg.JobSuffixAlias)
+	writeBool("use_jobs_subdirs", s.cfg.UseJobsSubdirs)
+
+	// Kill & cancel timeouts
+	writeInt("kill_delay", s.cfg.KillDelay)
+	writeInt("user_kill_delay", s.cfg.UserKillDelay)
+	writeInt("exit_code_canceled_job", s.cfg.ExitCodeCanceledJob)
+	writeInt("timeout_for_job_delete", s.cfg.TimeoutForJobDelete)
+	writeInt("timeout_for_job_requeue", s.cfg.TimeoutForJobRequeue)
+
+	// Hardware
+	writeStr("default_gpu_mode", s.cfg.DefaultGpuMode)
+	writeInt("idle_slot_limit", s.cfg.IdleSlotLimit)
+	writeBool("cgroup_per_task", s.cfg.CgroupPerTask)
+	writeBool("pass_cpu_clock", s.cfg.PassCpuClock)
+
+	// Other
+	writeStr("submit_hosts", s.cfg.SubmitHosts)
+	writeStr("node_submit_exceptions", s.cfg.NodeSubmitExceptions)
+	writeStr("node_suffix", s.cfg.NodeSuffix)
+	writeStr("comment", s.cfg.Comment)
+	writeInt("lock_file_update_time", s.cfg.LockFileUpdateTime)
+	writeInt("lock_file_check_time", s.cfg.LockFileCheckTime)
+	writeBool("interactive_jobs_can_roam", s.cfg.InteractiveJobsCanRoam)
+	writeBool("legacy_vmem", s.cfg.LegacyVmem)
+	writeBool("ghost_array_recovery", s.cfg.GhostArrayRecovery)
+	writeInt("tcp_incoming_timeout", s.cfg.TCPIncomingTimeout)
+	writeInt("job_full_report_time", s.cfg.JobFullReportTime)
+
+	sb.WriteString("</server_db>\n")
 
 	tmpFile := s.cfg.ServerDB + ".new"
 	if err := os.WriteFile(tmpFile, []byte(sb.String()), 0640); err == nil {
