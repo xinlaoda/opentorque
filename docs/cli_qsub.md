@@ -53,6 +53,162 @@ The Go implementation uses HMAC-SHA256 token authentication instead of the legac
 - `0` — Job submitted successfully
 - `1` — Error (connection failure, authentication error, or submission rejected)
 
+## Resource List (`-l`) Detailed Reference
+
+The `-l` option specifies resource requirements for the job. The scheduler uses
+these to select appropriate compute nodes, and the MOM daemon enforces limits
+during execution.
+
+**Format**: `-l key=value,key=value,...`
+
+### Available Resource Keywords
+
+| Resource | Type | Description | Example |
+|----------|------|-------------|---------|
+| `nodes` | string | Node count and processors per node | `nodes=2:ppn=4` |
+| `walltime` | HH:MM:SS | Maximum wall clock time | `walltime=04:00:00` |
+| `cput` | HH:MM:SS | Maximum CPU time | `cput=02:00:00` |
+| `mem` | size | Maximum physical memory | `mem=8gb` |
+| `vmem` | size | Maximum virtual memory | `vmem=16gb` |
+| `ncpus` | int | Number of CPU cores | `ncpus=8` |
+| `pmem` | size | Per-process memory limit | `pmem=2gb` |
+| `pvmem` | size | Per-process virtual memory | `pvmem=4gb` |
+| `file` | size | Maximum file size | `file=10gb` |
+
+Size units: `b` (bytes), `kb`, `mb`, `gb`, `tb`.
+
+### Interaction with MOM Configuration
+
+Resource enforcement on compute nodes is controlled by MOM config (`mom_priv/config`):
+
+| MOM Parameter | Default | Effect on `-l` |
+|---------------|---------|----------------|
+| `$ignwalltime` | false | If true, MOM won't kill jobs exceeding `-l walltime` |
+| `$ignmem` | false | If true, MOM won't kill jobs exceeding `-l mem` |
+| `$igncput` | false | If true, MOM won't kill jobs exceeding `-l cput` |
+| `$ignvmem` | false | If true, MOM won't kill jobs exceeding `-l vmem` |
+| `$cputmult` | 1.0 | Multiplier applied to CPU time limit (compensate for CPU speed) |
+| `$wallmult` | 1.0 | Multiplier applied to walltime limit |
+
+### Examples
+
+```bash
+# Single node, 4 cores, 8GB RAM, 2-hour walltime
+qsub -l nodes=1:ppn=4,walltime=02:00:00,mem=8gb job.sh
+
+# Two nodes with 8 cores each, large memory
+qsub -l nodes=2:ppn=8,mem=64gb,walltime=24:00:00 job.sh
+
+# CPU time limit (job killed if CPU time exceeds 4 hours)
+qsub -l cput=04:00:00,walltime=08:00:00 job.sh
+```
+
+## Additional Attributes (`-W`) Detailed Reference
+
+The `-W` option passes advanced job attributes. Multiple attributes are
+separated by commas: `-W key1=value1,key2=value2`.
+
+### Job Dependencies (`depend`)
+
+Control execution order between jobs. Jobs with unsatisfied dependencies
+remain in Queued (Q) state until conditions are met.
+
+**Format**: `-W depend=type:jobid[:jobid][,type:jobid...]`
+
+| Dependency Type | Condition to Run |
+|----------------|-----------------|
+| `afterok:jobid` | Run after jobid completes with exit status 0 |
+| `afternotok:jobid` | Run after jobid completes with non-zero exit |
+| `afterany:jobid` | Run after jobid completes (any exit status) |
+| `before:jobid` | This job must start before jobid can start |
+| `beforeok:jobid` | jobid runs only after this job succeeds |
+| `beforenotok:jobid` | jobid runs only after this job fails |
+| `beforeany:jobid` | jobid runs after this job completes (any exit) |
+
+**Examples**:
+```bash
+# Job B runs only if Job A succeeds
+JOB_A=$(echo 'echo step1' | qsub -N step1)
+echo 'echo step2' | qsub -N step2 -W depend=afterok:$JOB_A
+
+# Job C runs after Job A finishes, regardless of exit status
+echo 'echo cleanup' | qsub -N cleanup -W depend=afterany:$JOB_A
+
+# Job D runs only if Job A fails (e.g., error handler)
+echo 'echo error_handler' | qsub -N errhandler -W depend=afternotok:$JOB_A
+
+# Chain: A -> B -> C
+JOB_B=$(echo 'echo step2' | qsub -N step2 -W depend=afterok:$JOB_A)
+echo 'echo step3' | qsub -N step3 -W depend=afterok:$JOB_B
+
+# Multiple dependencies: run after both A and B succeed
+echo 'echo merge' | qsub -N merge -W depend=afterok:$JOB_A:$JOB_B
+```
+
+**Behavior**:
+- If a dependency job has been purged (removed from server), it is treated as
+  completed successfully for `afterok`/`afterany`.
+- The dependency check runs every scheduling cycle, so there may be a brief
+  delay after the parent completes.
+- Dependencies are checked by both the built-in scheduler and external
+  scheduler (pbs_sched).
+
+### File Staging (`stagein` / `stageout`)
+
+Transfer files to/from compute nodes before and after job execution.
+
+**Format**: `local_file@remote_host:remote_path`
+
+Multiple files separated by commas.
+
+**stagein** — Files copied TO the compute node BEFORE job starts:
+```bash
+# Copy input data from a file server before the job runs
+qsub -W stagein=input.dat@fileserver:/data/experiment/input.dat job.sh
+
+# Multiple files
+qsub -W stagein=data1.csv@storage:/csv/data1.csv,data2.csv@storage:/csv/data2.csv job.sh
+```
+
+**stageout** — Files copied FROM the compute node AFTER job finishes:
+```bash
+# Copy results back to a file server after the job completes
+qsub -W stageout=results.tar@fileserver:/results/output.tar job.sh
+
+# Both stagein and stageout
+qsub -W stagein=input.dat@storage:/in/input.dat,stageout=output.dat@storage:/out/output.dat job.sh
+```
+
+**Interaction with MOM Configuration**:
+- File transfers use `scp` by default
+- The MOM `$rcpcmd` config parameter can override the remote copy command
+- The MOM `$usecp` config maps remote paths to local paths for direct copy
+  (avoids network transfer for shared filesystems)
+- Stagein failures abort the job (before prologue runs)
+- Stageout failures are logged but don't change the job exit status
+
+### Group List (`group_list`)
+
+Specifies the Unix group(s) for the job.
+
+```bash
+# Run job under the 'research' group
+qsub -W group_list=research job.sh
+```
+
+### Combined `-W` Examples
+
+```bash
+# Complex workflow: dependencies + staging + group
+qsub -W depend=afterok:100.server,stagein=model.bin@storage:/models/v2.bin,group_list=ml_team job.sh
+
+# Pipeline with staging
+JOB1=$(echo 'process input.dat > output.dat' | qsub -N process \
+  -W stagein=input.dat@storage:/raw/data.dat)
+echo 'analyze output.dat' | qsub -N analyze \
+  -W depend=afterok:$JOB1,stageout=report.pdf@storage:/reports/report.pdf
+```
+
 ## Examples
 
 ```bash
