@@ -7,9 +7,11 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/xinlaoda/opentorque/internal/server"
+	"github.com/xinlaoda/opentorque/pkg/pbslog"
 )
 
 var version = "dev"
@@ -29,6 +31,16 @@ func main() {
 	}
 
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
+
+	// Set up YYYYMMDD dated log files in server_logs/
+	logDir := filepath.Join(*pbsHome, "server_logs")
+	dl, err := pbslog.Setup(logDir, *debug)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: cannot open server log dir %s: %v\n", logDir, err)
+	} else {
+		defer dl.Close()
+	}
+
 	log.Printf("pbs_server (Go) version %s starting", version)
 
 	// Build server configuration from flags

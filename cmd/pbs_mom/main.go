@@ -10,6 +10,7 @@ import (
 
 	"github.com/xinlaoda/opentorque/internal/mom/config"
 	"github.com/xinlaoda/opentorque/internal/mom/mom"
+	"github.com/xinlaoda/opentorque/pkg/pbslog"
 )
 
 const version = "7.0.0-go"
@@ -33,7 +34,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Set up logging
+	// Set up logging with YYYYMMDD dated files
 	setupLogging(*logFile, *pbsHome, *debug)
 
 	log.Printf("pbs_mom (Go) version %s starting", version)
@@ -76,12 +77,10 @@ func main() {
 	// Apply config-driven log directory override (re-open log if needed)
 	if cfg.LogDirectory != "" && *logFile == "" {
 		logDir := cfg.LogDirectory
-		os.MkdirAll(logDir, 0755)
-		logPath := filepath.Join(logDir, "mom_go.log")
-		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		dl, err := pbslog.Setup(logDir, *debug)
 		if err == nil {
-			log.SetOutput(f)
-			log.Printf("Log redirected to %s (from $log_directory config)", logPath)
+			_ = dl // kept open for process lifetime
+			log.Printf("Log redirected to %s (from $log_directory config)", logDir)
 		}
 	}
 
@@ -124,6 +123,7 @@ func main() {
 func setupLogging(logFile, pbsHome string, debug bool) {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 
+	// Explicit log file overrides everything
 	if logFile != "" {
 		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if err != nil {
@@ -135,15 +135,13 @@ func setupLogging(logFile, pbsHome string, debug bool) {
 	}
 
 	if !debug {
-		// Log to mom_logs directory
+		// Use YYYYMMDD dated log files in mom_logs/
 		logDir := filepath.Join(pbsHome, "mom_logs")
-		os.MkdirAll(logDir, 0755)
-		logPath := filepath.Join(logDir, "mom_go.log")
-		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		dl, err := pbslog.Setup(logDir, false)
 		if err != nil {
 			log.SetOutput(os.Stderr)
 			return
 		}
-		log.SetOutput(f)
+		_ = dl // kept open for process lifetime
 	}
 }

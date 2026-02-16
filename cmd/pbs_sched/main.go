@@ -14,12 +14,14 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/xinlaoda/opentorque/internal/sched/client"
 	"github.com/xinlaoda/opentorque/internal/sched/config"
 	"github.com/xinlaoda/opentorque/internal/sched/scheduler"
+	"github.com/xinlaoda/opentorque/pkg/pbslog"
 )
 
 func main() {
@@ -31,6 +33,15 @@ func main() {
 	_ = debug
 
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
+
+	// Set up YYYYMMDD dated log files in sched_logs/
+	logDir := filepath.Join(*pbsHome, "sched_logs")
+	dl, err := pbslog.Setup(logDir, *debug)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: cannot open sched log dir %s: %v\n", logDir, err)
+	} else {
+		defer dl.Close()
+	}
 
 	cfg := config.Load(*pbsHome)
 	log.Printf("pbs_sched (Go) starting")

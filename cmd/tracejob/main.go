@@ -113,8 +113,10 @@ func main() {
 }
 
 // findLogFiles returns log files from the given directory for the last N days.
+// It looks for both YYYYMMDD-named files and any *.log files.
 func findLogFiles(dir string, days int) []string {
 	var files []string
+	seen := make(map[string]bool)
 	now := time.Now()
 	for d := 0; d < days; d++ {
 		date := now.AddDate(0, 0, -d)
@@ -123,6 +125,14 @@ func findLogFiles(dir string, days int) []string {
 		path := filepath.Join(dir, name)
 		if _, err := os.Stat(path); err == nil {
 			files = append(files, path)
+			seen[path] = true
+		}
+	}
+	// Also pick up any *.log files in the directory as fallback
+	matches, _ := filepath.Glob(filepath.Join(dir, "*.log"))
+	for _, m := range matches {
+		if !seen[m] {
+			files = append(files, m)
 		}
 	}
 	return files
@@ -157,17 +167,60 @@ func searchLog(path, fullID, shortID, source string) []logEntry {
 }
 
 // matchJobLine checks if a log line refers to the given job.
-// Matches the full job ID or the short numeric ID with boundary delimiters.
+// Matches the full job ID (e.g. "6.DevBox") or the short numeric ID
+// only when it appears in a job-like context (followed by '.' or preceded
+// by a job-related keyword).
 func matchJobLine(line, fullID, shortID string) bool {
-	// Try full ID with boundary check
+	// Always try full ID first (e.g. "6.DevBox")
 	if matchWithBoundary(line, fullID) {
 		return true
 	}
-	// Try short numeric ID with boundary check
+	// For short numeric ID, require it appears as "<shortID>." (job ID prefix)
+	// or is preceded by common job-context patterns like "job ", "Job ", "=", "/"
 	if shortID != fullID {
-		return matchWithBoundary(line, shortID)
+		return matchShortID(line, shortID)
 	}
 	return false
+}
+
+// matchShortID checks if a short numeric job ID appears in a job-related context.
+// Accepts patterns like: "job 6", "Job 6", "6.DevBox", "id=6", "/6.SC"
+func matchShortID(line, shortID string) bool {
+	idx := 0
+	for {
+		pos := strings.Index(line[idx:], shortID)
+		if pos < 0 {
+			return false
+		}
+		pos += idx
+		end := pos + len(shortID)
+		start := pos - 1
+
+		validBefore := start < 0 || !isIDChar(line[start])
+		validAfter := end >= len(line) || !isIDChar(line[end])
+
+		if validBefore && validAfter {
+			// Additional context check: the character after should be '.'
+			// (job IDs appear as "6.DevBox") or the line must contain
+			// a job-related keyword near the match.
+			afterIsDot := end < len(line) && line[end] == '.'
+			if afterIsDot {
+				return true
+			}
+			// Check for job-related context before the number
+			if start >= 0 {
+				ch := line[start]
+				// preceded by space, =, /, ( — common in "job 6", "id=6", "/6.SC", "(6)"
+				if ch == ' ' || ch == '=' || ch == '/' || ch == '(' {
+					return true
+				}
+			}
+		}
+		idx = pos + 1
+		if idx >= len(line) {
+			return false
+		}
+	}
 }
 
 // matchWithBoundary checks if pattern appears in line with non-ID chars on both sides.
