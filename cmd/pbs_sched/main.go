@@ -50,6 +50,9 @@ func main() {
 		interval = 5 * time.Second
 	}
 
+	// Ignore SIGHUP so the scheduler survives when the parent shell exits
+	signal.Ignore(syscall.SIGHUP)
+
 	// Signal handling for graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
