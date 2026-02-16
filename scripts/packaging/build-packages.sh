@@ -111,6 +111,16 @@ for pkg in server compute cli; do
       for b in $CLI_BINS; do
         cp "$BIN_DIR/$b" "$STAGE/usr/local/bin/"
       done
+      # PATH setup for systems where /usr/local/bin is not in default PATH
+      mkdir -p "$STAGE/etc/profile.d"
+      cat > "$STAGE/etc/profile.d/opentorque.sh" <<'PROF'
+# OpenTorque CLI tools PATH
+case ":$PATH:" in
+  *:/usr/local/bin:*) ;;
+  *) export PATH="/usr/local/bin:$PATH" ;;
+esac
+PROF
+      chmod 644 "$STAGE/etc/profile.d/opentorque.sh"
       ;;
   esac
 done
