@@ -7,7 +7,7 @@ DAEMONS := pbs_server pbs_mom pbs_sched
 CLI_TOOLS := qsub qstat qdel qhold qrls pbsnodes qmgr qalter qrun qrerun qmove qorder qsig qmsg qstart qstop qenable qdisable qterm qselect qchkpt
 UTIL_TOOLS := tracejob pbsdsh momctl pbs_track printjob pbs_pam_check
 
-.PHONY: all server mom sched cli clean install test fmt vet
+.PHONY: all server mom sched cli clean install test fmt vet packages packages-deb packages-rpm
 
 all: server mom sched cli tools
 
@@ -57,3 +57,11 @@ install: all
 uninstall:
 	@for d in $(DAEMONS); do rm -f $(PREFIX)/sbin/$$d; done
 	@for t in $(CLI_TOOLS); do rm -f $(PREFIX)/bin/$$t; done
+
+packages-deb:
+	./scripts/packaging/build-packages.sh deb $(VERSION)
+
+packages-rpm:
+	./scripts/packaging/build-packages.sh rpm $(VERSION)
+
+packages: packages-deb packages-rpm

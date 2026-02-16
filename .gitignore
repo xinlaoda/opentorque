@@ -24,3 +24,4 @@ Thumbs.db
 # Temporary
 /tmp/
 *.log
+dist/
