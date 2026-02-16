@@ -595,10 +595,14 @@ func (s *Server) handleJobScript(conn net.Conn, r *dis.Reader, hdr *dis.RequestH
 
 	// Auto-commit for "2" protocol variant (QueueJob2/JobScript2/Commit2)
 	if autoCommit {
-		j.Mu.Lock()
-		j.SetState(job.StateQueued, job.SubstateQueued)
+		s.setDefaultOutputPaths(j)
+
+		// Transition via manager to update state counters
+		s.jobMgr.UpdateJobState(jobID, job.StateQueued, job.SubstateQueued)
+
+		j.Mu.RLock()
 		queueName := j.Queue
-		j.Mu.Unlock()
+		j.Mu.RUnlock()
 
 		if q := s.queueMgr.GetQueue(queueName); q != nil {
 			q.IncrJobCount(job.StateQueued)
@@ -638,11 +642,15 @@ func (s *Server) handleCommit(conn net.Conn, r *dis.Reader, hdr *dis.RequestHead
 		return false
 	}
 
-	// Transition job to Queued state - it's now eligible for scheduling
-	j.Mu.Lock()
-	j.SetState(job.StateQueued, job.SubstateQueued)
+	// Set default output paths if not specified by user
+	s.setDefaultOutputPaths(j)
+
+	// Transition job to Queued state via manager (updates state counters)
+	s.jobMgr.UpdateJobState(jobID, job.StateQueued, job.SubstateQueued)
+
+	j.Mu.RLock()
 	queueName := j.Queue
-	j.Mu.Unlock()
+	j.Mu.RUnlock()
 
 	// Update queue counters
 	if q := s.queueMgr.GetQueue(queueName); q != nil {
@@ -655,6 +663,40 @@ func (s *Server) handleCommit(conn net.Conn, r *dis.Reader, hdr *dis.RequestHead
 	log.Printf("[SERVER] Commit job %s to queue %s", jobID, queueName)
 	dis.SendJobIDReply(conn, dis.ReplyChoiceCommit, jobID)
 	return true
+}
+
+// setDefaultOutputPaths assigns default stdout/stderr paths using TORQUE convention:
+// <hostname>:<home_or_workdir>/<jobname>.o<seqnum> / .e<seqnum>
+func (s *Server) setDefaultOutputPaths(j *job.Job) {
+	j.Mu.Lock()
+	defer j.Mu.Unlock()
+
+	if j.StdoutPath != "" && j.StderrPath != "" {
+		return
+	}
+
+	// Extract sequence number from job ID (e.g., "5.DevBox" -> "5")
+	seqStr := j.ID
+	if idx := strings.Index(j.ID, "."); idx > 0 {
+		seqStr = j.ID[:idx]
+	}
+
+	// Determine output directory: PBS_O_HOME or PBS_O_WORKDIR
+	dir := j.VariableList["PBS_O_HOME"]
+	if dir == "" {
+		dir = j.VariableList["PBS_O_WORKDIR"]
+	}
+	if dir == "" {
+		dir = "/tmp"
+	}
+
+	hostname, _ := os.Hostname()
+	if j.StdoutPath == "" {
+		j.StdoutPath = hostname + ":" + filepath.Join(dir, j.Name+".o"+seqStr)
+	}
+	if j.StderrPath == "" {
+		j.StderrPath = hostname + ":" + filepath.Join(dir, j.Name+".e"+seqStr)
+	}
 }
 
 // handleDeleteJob processes a qdel request to cancel/delete a job.

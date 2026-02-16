@@ -44,7 +44,7 @@ func main() {
 	}
 
 	jobID := flag.Arg(0)
-	// Strip server suffix for matching (e.g., "123.server" -> also match "123")
+	// Extract numeric sequence for boundary matching (e.g., "123.server" -> "123")
 	shortID := strings.Split(jobID, ".")[0]
 
 	// Default: search all log sources
@@ -56,7 +56,7 @@ func main() {
 	if searchAll || *showSvr {
 		svrLogs := findLogFiles(filepath.Join(*pbsHome, "server_logs"), *days)
 		for _, f := range svrLogs {
-			entries = append(entries, searchLog(f, shortID, "Server")...)
+			entries = append(entries, searchLog(f, jobID, shortID, "Server")...)
 		}
 	}
 
@@ -64,7 +64,7 @@ func main() {
 	if searchAll || *showMom {
 		momLogs := findLogFiles(filepath.Join(*pbsHome, "mom_logs"), *days)
 		for _, f := range momLogs {
-			entries = append(entries, searchLog(f, shortID, "MOM")...)
+			entries = append(entries, searchLog(f, jobID, shortID, "MOM")...)
 		}
 	}
 
@@ -72,14 +72,16 @@ func main() {
 	if searchAll || *showSched {
 		schedLogs := findLogFiles(filepath.Join(*pbsHome, "sched_logs"), *days)
 		for _, f := range schedLogs {
-			entries = append(entries, searchLog(f, shortID, "Sched")...)
+			entries = append(entries, searchLog(f, jobID, shortID, "Sched")...)
 		}
 	}
 
 	// Also search common log locations
 	if searchAll {
-		for _, path := range []string{"/tmp/server.log", "/tmp/mom.log", "/tmp/sched.log"} {
-			if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		// Search /tmp for any server, mom, sched log files
+		for _, pattern := range []string{"/tmp/*server*.log", "/tmp/*mom*.log", "/tmp/*sched*.log"} {
+			matches, _ := filepath.Glob(pattern)
+			for _, path := range matches {
 				source := "Log"
 				if strings.Contains(path, "server") {
 					source = "Server"
@@ -88,7 +90,7 @@ func main() {
 				} else if strings.Contains(path, "sched") {
 					source = "Sched"
 				}
-				entries = append(entries, searchLog(path, shortID, source)...)
+				entries = append(entries, searchLog(path, jobID, shortID, source)...)
 			}
 		}
 	}
@@ -126,8 +128,8 @@ func findLogFiles(dir string, days int) []string {
 	return files
 }
 
-// searchLog searches a log file for lines containing the job ID.
-func searchLog(path, jobID, source string) []logEntry {
+// searchLog searches a log file for lines referring to the given job.
+func searchLog(path, fullID, shortID, source string) []logEntry {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
@@ -138,18 +140,59 @@ func searchLog(path, jobID, source string) []logEntry {
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := scanner.Text()
-		if strings.Contains(line, jobID) {
-			// Extract timestamp (first field, typically YYYY/MM/DD HH:MM:SS)
-			ts := ""
-			if len(line) > 19 {
-				ts = line[:19]
-			}
-			entries = append(entries, logEntry{
-				Source: source,
-				Time:   ts,
-				Line:   line,
-			})
+		if !matchJobLine(line, fullID, shortID) {
+			continue
 		}
+		ts := ""
+		if len(line) > 19 {
+			ts = line[:19]
+		}
+		entries = append(entries, logEntry{
+			Source: source,
+			Time:   ts,
+			Line:   line,
+		})
 	}
 	return entries
+}
+
+// matchJobLine checks if a log line refers to the given job.
+// Matches the full job ID or the short numeric ID with boundary delimiters.
+func matchJobLine(line, fullID, shortID string) bool {
+	// Try full ID with boundary check
+	if matchWithBoundary(line, fullID) {
+		return true
+	}
+	// Try short numeric ID with boundary check
+	if shortID != fullID {
+		return matchWithBoundary(line, shortID)
+	}
+	return false
+}
+
+// matchWithBoundary checks if pattern appears in line with non-ID chars on both sides.
+func matchWithBoundary(line, pattern string) bool {
+	idx := 0
+	for {
+		pos := strings.Index(line[idx:], pattern)
+		if pos < 0 {
+			return false
+		}
+		pos += idx
+		start := pos - 1
+		end := pos + len(pattern)
+		validBefore := start < 0 || !isIDChar(line[start])
+		validAfter := end >= len(line) || !isIDChar(line[end])
+		if validBefore && validAfter {
+			return true
+		}
+		idx = pos + 1
+		if idx >= len(line) {
+			return false
+		}
+	}
+}
+
+func isIDChar(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_'
 }

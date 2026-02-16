@@ -133,8 +133,8 @@ func buildAttrs(name, resources, outPath, errPath, join, mail, mailUser, workDir
 		})
 	}
 
-	// Build variable list
-	if varList != "" || exportAll {
+	// Build variable list: always include PBS_O_HOME, PBS_O_WORKDIR, PBS_O_LOGNAME
+	{
 		var vars []string
 		if varList != "" {
 			vars = append(vars, varList)
@@ -144,11 +144,9 @@ func buildAttrs(name, resources, outPath, errPath, join, mail, mailUser, workDir
 				vars = append(vars, env)
 			}
 		}
-		// Add user info
 		u, _ := user.Current()
 		if u != nil {
-			homeDir := u.HomeDir
-			vars = append(vars, "PBS_O_HOME="+homeDir)
+			vars = append(vars, "PBS_O_HOME="+u.HomeDir)
 			vars = append(vars, "PBS_O_LOGNAME="+u.Username)
 		}
 		wd, _ := os.Getwd()

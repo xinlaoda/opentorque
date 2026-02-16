@@ -71,21 +71,21 @@ func main() {
 
 // runOneCycle performs a single scheduling cycle with a fresh connection.
 func runOneCycle(sched *scheduler.Scheduler, cfg *config.Config) {
+	log.Printf("[SCHED] Starting cycle (server=%s)", cfg.Server)
 	conn, err := client.Connect(cfg.Server)
 	if err != nil {
-		log.Printf("[SCHED] Cannot connect to server: %v", err)
+		log.Printf("[SCHED] Cannot connect to server %s: %v", cfg.Server, err)
 		return
 	}
 	defer conn.Close()
+	log.Printf("[SCHED] Connected, running scheduling cycle")
 
 	dispatched, err := sched.RunCycle(conn)
 	if err != nil {
 		log.Printf("[SCHED] Cycle error: %v", err)
 		return
 	}
-	if dispatched > 0 {
-		log.Printf("[SCHED] Cycle complete: dispatched %d job(s)", dispatched)
-	}
+	log.Printf("[SCHED] Cycle finished: dispatched %d job(s)", dispatched)
 }
 
 func init() {
