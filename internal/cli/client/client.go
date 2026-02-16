@@ -408,6 +408,11 @@ func (c *Conn) SubmitJob(queue string, attrs []dis.SvrAttrl, script string) (str
 // DeleteJob sends a DeleteJob request.
 // Body uses Manage format: cmd(uint) objtype(uint) name(str) attrs(svrattrl) extension(str)
 func (c *Conn) DeleteJob(jobID string) error {
+	return c.DeleteJobExtend(jobID, "")
+}
+
+// DeleteJobExtend sends a DeleteJob request with an extension string.
+func (c *Conn) DeleteJobExtend(jobID, extend string) error {
 	c.conn.SetWriteDeadline(time.Now().Add(requestTimeout))
 	if err := c.writeHeader(dis.BatchReqDeleteJob); err != nil {
 		return err
@@ -424,7 +429,7 @@ func (c *Conn) DeleteJob(jobID string) error {
 	if err := dis.WriteSvrAttrl(c.writer, nil); err != nil { // empty attrs
 		return err
 	}
-	if err := c.writer.WriteString(""); err != nil { // extension
+	if err := c.writer.WriteString(extend); err != nil { // extension
 		return err
 	}
 	if err := c.writer.Flush(); err != nil {

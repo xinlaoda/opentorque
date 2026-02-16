@@ -20,12 +20,17 @@ import (
 
 func main() {
 	var (
-		holdList  = flag.String("h", "", "Select by hold type (u/o/s/n)")
-		resources = flag.String("l", "", "Select by resource list (resource=value,...)")
-		jobName   = flag.String("N", "", "Select by job name")
-		queue     = flag.String("q", "", "Select by queue name")
-		states    = flag.String("s", "", "Select by state (Q=queued, R=running, H=held, C=complete)")
-		userList  = flag.String("u", "", "Select by owner (user1,user2,...)")
+		execTime   = flag.String("a", "", "Select by execution time")
+		account    = flag.String("A", "", "Select by account name")
+		checkpoint = flag.String("c", "", "Select by checkpoint")
+		holdList   = flag.String("h", "", "Select by hold type (u/o/s/n)")
+		resources  = flag.String("l", "", "Select by resource list (resource=value,...)")
+		jobName    = flag.String("N", "", "Select by job name")
+		priority   = flag.String("p", "", "Select by priority (op:value)")
+		queue      = flag.String("q", "", "Select by queue name")
+		rerunnable = flag.String("r", "", "Select by rerunnable (y/n)")
+		states     = flag.String("s", "", "Select by state (Q=queued, R=running, H=held, C=complete)")
+		userList   = flag.String("u", "", "Select by owner (user1,user2,...)")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: qselect [options]\n\nSelect jobs matching criteria and print job IDs.\n\nOptions:\n")
@@ -35,6 +40,15 @@ func main() {
 	flag.Parse()
 
 	var attrs []dis.SvrAttrl
+	if *execTime != "" {
+		attrs = append(attrs, dis.SvrAttrl{Name: "Execution_Time", Value: *execTime})
+	}
+	if *account != "" {
+		attrs = append(attrs, dis.SvrAttrl{Name: "Account_Name", Value: *account})
+	}
+	if *checkpoint != "" {
+		attrs = append(attrs, dis.SvrAttrl{Name: "Checkpoint", Value: *checkpoint})
+	}
 	if *holdList != "" {
 		attrs = append(attrs, dis.SvrAttrl{Name: "Hold_Types", Value: *holdList})
 	}
@@ -51,6 +65,12 @@ func main() {
 	}
 	if *queue != "" {
 		attrs = append(attrs, dis.SvrAttrl{Name: "queue", Value: *queue})
+	}
+	if *priority != "" {
+		attrs = append(attrs, dis.SvrAttrl{Name: "Priority", Value: *priority})
+	}
+	if *rerunnable != "" {
+		attrs = append(attrs, dis.SvrAttrl{Name: "Rerunable", Value: *rerunnable})
 	}
 	if *states != "" {
 		attrs = append(attrs, dis.SvrAttrl{Name: "job_state", Value: *states})

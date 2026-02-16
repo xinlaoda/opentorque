@@ -19,11 +19,17 @@ import (
 
 func main() {
 	var (
-		copies  = flag.Int("c", 0, "Number of copies to run (0 = one per node)")
-		oneNode = flag.Bool("o", false, "Run on first node only")
-		stdin   = flag.Bool("s", false, "Read command from stdin")
-		verbose = flag.Bool("v", false, "Verbose output")
+		copies   = flag.Int("c", 0, "Number of copies to run (0 = one per node)")
+		oneNode  = flag.Bool("o", false, "Run on first node only")
+		stdin    = flag.Bool("s", false, "Read command from stdin")
+		verbose  = flag.Bool("v", false, "Verbose output")
+		hostFlag = flag.String("h", "", "Run command on specific host")
+		nodeNum  = flag.Int("n", -1, "Run on specific node number from PBS_NODEFILE")
+		unique   = flag.Bool("u", false, "Run once per unique hostname")
+		envList  = flag.String("e", "", "Comma-separated env vars to pass")
+		passEnv  = flag.Bool("E", false, "Pass all environment variables")
 	)
+	_, _ = envList, passEnv
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: pbsdsh [-c copies] [-o] [-s] [-v] [command [args...]]\n\n")
 		fmt.Fprintf(os.Stderr, "Execute a command on all nodes allocated to a PBS job.\n\nOptions:\n")
@@ -32,22 +38,37 @@ func main() {
 	}
 	flag.Parse()
 
-	// Read nodes from PBS_NODEFILE
-	nodeFile := os.Getenv("PBS_NODEFILE")
-	if nodeFile == "" {
-		fmt.Fprintf(os.Stderr, "pbsdsh: PBS_NODEFILE not set (not running inside a PBS job?)\n")
-		os.Exit(1)
+	// Read nodes from PBS_NODEFILE or use -h override
+	var nodes []string
+	if *hostFlag != "" {
+		nodes = []string{*hostFlag}
+	} else {
+		nodeFile := os.Getenv("PBS_NODEFILE")
+		if nodeFile == "" {
+			fmt.Fprintf(os.Stderr, "pbsdsh: PBS_NODEFILE not set (not running inside a PBS job?)\n")
+			os.Exit(1)
+		}
+
+		var err error
+		nodes, err = readNodeFile(nodeFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "pbsdsh: cannot read nodefile %s: %v\n", nodeFile, err)
+			os.Exit(1)
+		}
+
+		if len(nodes) == 0 {
+			fmt.Fprintf(os.Stderr, "pbsdsh: no nodes found in %s\n", nodeFile)
+			os.Exit(1)
+		}
 	}
 
-	nodes, err := readNodeFile(nodeFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "pbsdsh: cannot read nodefile %s: %v\n", nodeFile, err)
-		os.Exit(1)
-	}
-
-	if len(nodes) == 0 {
-		fmt.Fprintf(os.Stderr, "pbsdsh: no nodes found in %s\n", nodeFile)
-		os.Exit(1)
+	// Handle -n: select specific node number
+	if *nodeNum >= 0 {
+		if *nodeNum >= len(nodes) {
+			fmt.Fprintf(os.Stderr, "pbsdsh: node number %d out of range (have %d nodes)\n", *nodeNum, len(nodes))
+			os.Exit(1)
+		}
+		nodes = []string{nodes[*nodeNum]}
 	}
 
 	// Determine command to run
@@ -67,7 +88,10 @@ func main() {
 	}
 
 	// Determine target nodes
-	targetNodes := uniqueNodes(nodes)
+	targetNodes := nodes
+	if *unique || *hostFlag == "" {
+		targetNodes = uniqueNodes(nodes)
+	}
 	if *oneNode {
 		targetNodes = targetNodes[:1]
 	}

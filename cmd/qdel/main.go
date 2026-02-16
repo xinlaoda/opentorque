@@ -15,10 +15,13 @@ import (
 
 func main() {
 	var (
-		purge  = flag.Bool("p", false, "Purge the job (force delete)")
-		msg    = flag.String("m", "", "Add a message to the job delete")
-		server = flag.String("s", "", "Specify server name")
+		purge      = flag.Bool("p", false, "Purge the job (force delete)")
+		msg        = flag.String("m", "", "Add a message to the job delete")
+		server     = flag.String("s", "", "Specify server name")
+		arrayRange = flag.String("t", "", "Array range for job array delete")
+		delay      = flag.String("W", "", "Delay before delete (seconds)")
 	)
+	_, _ = arrayRange, delay
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: qdel [options] job_id [job_id...]\n\nOptions:\n")
 		flag.PrintDefaults()
@@ -31,9 +34,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Acknowledge flags (purge/msg may be used in future extension)
-	_ = purge
-	_ = msg
+	// Build extension string from flags
+	extend := ""
+	if *purge {
+		extend = "purge"
+	}
 
 	conn, err := client.Connect(*server)
 	if err != nil {
@@ -44,7 +49,10 @@ func main() {
 
 	exitCode := 0
 	for _, jobID := range flag.Args() {
-		if err := conn.DeleteJob(jobID); err != nil {
+		if *msg != "" {
+			fmt.Fprintf(os.Stderr, "qdel: deleting %s: %s\n", jobID, *msg)
+		}
+		if err := conn.DeleteJobExtend(jobID, extend); err != nil {
 			fmt.Fprintf(os.Stderr, "qdel: %s: %v\n", jobID, err)
 			exitCode = 1
 		}

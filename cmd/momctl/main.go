@@ -23,12 +23,14 @@ const (
 
 func main() {
 	var (
-		diag    = flag.Int("d", -1, "Diagnostic level (0-3)")
-		query   = flag.String("q", "", "Query a specific attribute")
-		status  = flag.Bool("s", false, "Show full status")
-		host    = flag.String("h", "localhost", "MOM hostname")
-		port    = flag.Int("p", defaultMomPort, "MOM port")
+		diag     = flag.Int("d", -1, "Diagnostic level (0-3)")
+		query    = flag.String("q", "", "Query a specific attribute")
+		status   = flag.Bool("s", false, "Show full status")
+		host     = flag.String("h", "localhost", "MOM hostname")
+		port     = flag.Int("p", defaultMomPort, "MOM port")
 		shutdown = flag.Bool("S", false, "Shut down MOM")
+		clearJob = flag.String("c", "", "Clear/remove a stale job from MOM")
+		reconfig = flag.String("r", "", "Reconfigure MOM")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: momctl [options]\n\n")
@@ -51,6 +53,18 @@ func main() {
 	if *shutdown {
 		fmt.Fprintf(os.Stderr, "momctl: shutdown not implemented in this version\n")
 		os.Exit(1)
+	}
+
+	if *clearJob != "" {
+		fmt.Printf("momctl: requesting MOM at %s to clear job %s\n", addr, *clearJob)
+		fmt.Printf("  (Clear job not yet fully implemented)\n")
+		return
+	}
+
+	if *reconfig != "" {
+		fmt.Printf("momctl: requesting MOM at %s to reconfigure: %s\n", addr, *reconfig)
+		fmt.Printf("  (Reconfigure not yet fully implemented)\n")
+		return
 	}
 
 	if *diag >= 0 {

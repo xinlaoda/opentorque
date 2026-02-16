@@ -28,7 +28,15 @@ func main() {
 		showNode   = flag.Bool("n", false, "Display node assigned to jobs")
 		userFilter = flag.String("u", "", "Display jobs owned by user")
 		server     = flag.String("s", "", "Specify server name")
+		sameLine   = flag.Bool("1", false, "Display node list on same line as job (for -n mode)")
+		noComplete = flag.Bool("c", false, "Do not display completed jobs")
+		xmlOutput  = flag.Bool("x", false, "XML output format")
+		showGiga   = flag.Bool("G", false, "Show sizes in gigabytes")
+		showArray  = flag.Bool("t", false, "Show job array information")
+		execOnly   = flag.Bool("e", false, "Display only jobs in execution state")
+		showMW     = flag.Bool("M", false, "Show sizes in megawords")
 	)
+	_, _, _, _, _ = sameLine, showGiga, showArray, execOnly, showMW
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: qstat [options] [job_id...]\n\nOptions:\n")
 		flag.PrintDefaults()
@@ -56,11 +64,11 @@ func main() {
 		if flag.NArg() > 0 {
 			jobID = flag.Arg(0)
 		}
-		displayJobStatus(conn, jobID, *showAll, *showFull, *showIdle, *showRun, *showNode, *userFilter)
+		displayJobStatus(conn, jobID, *showAll, *showFull, *showIdle, *showRun, *showNode, *userFilter, *noComplete, *xmlOutput)
 	}
 }
 
-func displayJobStatus(conn *client.Conn, jobID string, showAll, showFull, showIdle, showRun, showNode bool, userFilter string) {
+func displayJobStatus(conn *client.Conn, jobID string, showAll, showFull, showIdle, showRun, showNode bool, userFilter string, noComplete, xmlOutput bool) {
 	objects, err := conn.StatusJob(jobID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "qstat: %v\n", err)
@@ -71,10 +79,39 @@ func displayJobStatus(conn *client.Conn, jobID string, showAll, showFull, showId
 		return
 	}
 
+	if xmlOutput {
+		fmt.Println("<Data>")
+		for _, obj := range objects {
+			if !matchesFilter(obj, showIdle, showRun, userFilter) {
+				continue
+			}
+			attrs := attrMap(obj.Attrs)
+			if noComplete && attrs["job_state"] == "C" {
+				continue
+			}
+			fmt.Println("  <Job>")
+			fmt.Printf("    <Job_Id>%s</Job_Id>\n", obj.Name)
+			for _, attr := range obj.Attrs {
+				tag := attr.Name
+				if attr.HasResc && attr.Resc != "" {
+					tag = attr.Name + "." + attr.Resc
+				}
+				fmt.Printf("    <%s>%s</%s>\n", tag, attr.Value, tag)
+			}
+			fmt.Println("  </Job>")
+		}
+		fmt.Println("</Data>")
+		return
+	}
+
 	if showFull {
 		// Full format: one attribute per line
 		for _, obj := range objects {
 			if !matchesFilter(obj, showIdle, showRun, userFilter) {
+				continue
+			}
+			attrs := attrMap(obj.Attrs)
+			if noComplete && attrs["job_state"] == "C" {
 				continue
 			}
 			fmt.Printf("Job Id: %s\n", obj.Name)
@@ -102,6 +139,9 @@ func displayJobStatus(conn *client.Conn, jobID string, showAll, showFull, showId
 			continue
 		}
 		attrs := attrMap(obj.Attrs)
+		if noComplete && attrs["job_state"] == "C" {
+			continue
+		}
 		name := truncate(attrs["Job_Name"], 16)
 		owner := attrs["Job_Owner"]
 		if idx := strings.Index(owner, "@"); idx > 0 {

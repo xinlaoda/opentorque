@@ -30,7 +30,12 @@ func main() {
 		priority  = flag.String("p", "", "Job priority (-1024 to +1023)")
 		rerun     = flag.String("r", "", "Rerunable (y/n)")
 		shell     = flag.String("S", "", "Shell path")
-		extra     = flag.String("W", "", "Additional attributes (key=value,...)")
+		account    = flag.String("A", "", "Account name")
+		checkpoint = flag.String("c", "", "Checkpoint option")
+		join       = flag.String("j", "", "Join stdout/stderr (oe/eo/n)")
+		keep       = flag.String("k", "", "Keep files (o/e/oe/n)")
+		queue      = flag.String("q", "", "Move to different queue")
+		extra      = flag.String("W", "", "Additional attributes (key=value,...)")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: qalter [options] job_id...\n\nModify attributes of a PBS job.\n\nOptions:\n")
@@ -83,6 +88,21 @@ func main() {
 	}
 	if *shell != "" {
 		attrs = append(attrs, dis.SvrAttrl{Name: "Shell_Path_List", Value: *shell})
+	}
+	if *account != "" {
+		attrs = append(attrs, dis.SvrAttrl{Name: "Account_Name", Value: *account})
+	}
+	if *checkpoint != "" {
+		attrs = append(attrs, dis.SvrAttrl{Name: "Checkpoint", Value: *checkpoint})
+	}
+	if *join != "" {
+		attrs = append(attrs, dis.SvrAttrl{Name: "Join_Path", Value: *join})
+	}
+	if *keep != "" {
+		attrs = append(attrs, dis.SvrAttrl{Name: "Keep_Files", Value: *keep})
+	}
+	if *queue != "" {
+		attrs = append(attrs, dis.SvrAttrl{Name: "queue", Value: *queue})
 	}
 	if *extra != "" {
 		for _, kv := range strings.Split(*extra, ",") {

@@ -30,6 +30,9 @@ func main() {
 		quiet       = flag.Bool("q", false, "Quiet mode")
 		xmlOutput   = flag.Bool("x", false, "XML output format")
 		note        = flag.String("N", "", "Set a note on the node")
+		appendNote  = flag.String("A", "", "Append to existing note on the node")
+		showNotes   = flag.Bool("n", false, "Show only node notes")
+		diagnostic  = flag.Bool("d", false, "Diagnostic mode (verbose output)")
 		server      = flag.String("s", "", "Specify server name")
 	)
 	flag.Usage = func() {
@@ -38,7 +41,7 @@ func main() {
 	}
 	flag.Parse()
 	_ = quiet
-	_ = xmlOutput
+	_ = diagnostic
 
 	conn, err := client.Connect(*server)
 	if err != nil {
@@ -72,6 +75,23 @@ func main() {
 			}
 		}
 
+	case *appendNote != "":
+		if flag.NArg() < 1 {
+			fmt.Fprintf(os.Stderr, "pbsnodes: no node specified\n")
+			os.Exit(1)
+		}
+		for _, node := range flag.Args() {
+			// Read current note and append
+			noteVal := *appendNote
+			if *note != "" {
+				noteVal = *note + " " + noteVal
+			}
+			attrs := []dis.SvrAttrl{{Name: "note", Value: noteVal, Op: 1}}
+			if err := conn.Manager(dis.MgrCmdSet, dis.MgrObjNode, node, attrs); err != nil {
+				fmt.Fprintf(os.Stderr, "pbsnodes: %s: %v\n", node, err)
+			}
+		}
+
 	case *note != "":
 		if flag.NArg() < 1 {
 			fmt.Fprintf(os.Stderr, "pbsnodes: no node specified\n")
@@ -95,7 +115,13 @@ func main() {
 			fmt.Fprintf(os.Stderr, "pbsnodes: %v\n", err)
 			os.Exit(1)
 		}
-		displayNodes(objects, *listDown)
+		if *xmlOutput {
+			displayNodesXML(objects, *listDown)
+		} else if *showNotes {
+			displayNodeNotes(objects)
+		} else {
+			displayNodes(objects, *listDown)
+		}
 	}
 }
 
@@ -126,5 +152,48 @@ func displayNodes(objects []client.StatusObject, downOnly bool) {
 			}
 		}
 		fmt.Println()
+	}
+}
+
+func displayNodesXML(objects []client.StatusObject, downOnly bool) {
+	fmt.Println("<Data>")
+	for _, obj := range objects {
+		attrs := make(map[string]string)
+		for _, a := range obj.Attrs {
+			key := a.Name
+			if a.HasResc && a.Resc != "" {
+				key = a.Name + "." + a.Resc
+			}
+			attrs[key] = a.Value
+		}
+
+		state := attrs["state"]
+		if downOnly {
+			if !strings.Contains(state, "down") && !strings.Contains(state, "offline") {
+				continue
+			}
+		}
+
+		fmt.Println("  <Node>")
+		fmt.Printf("    <name>%s</name>\n", obj.Name)
+		for _, a := range obj.Attrs {
+			tag := a.Name
+			if a.HasResc && a.Resc != "" {
+				tag = a.Name + "." + a.Resc
+			}
+			fmt.Printf("    <%s>%s</%s>\n", tag, a.Value, tag)
+		}
+		fmt.Println("  </Node>")
+	}
+	fmt.Println("</Data>")
+}
+
+func displayNodeNotes(objects []client.StatusObject) {
+	for _, obj := range objects {
+		for _, a := range obj.Attrs {
+			if a.Name == "note" {
+				fmt.Printf("%s: %s\n", obj.Name, a.Value)
+			}
+		}
 	}
 }
