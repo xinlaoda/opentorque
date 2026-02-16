@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xinlaoda/opentorque/internal/acct"
 	"github.com/xinlaoda/opentorque/internal/auth"
 	"github.com/xinlaoda/opentorque/internal/config"
 	"github.com/xinlaoda/opentorque/internal/dis"
@@ -53,6 +54,9 @@ type Server struct {
 	// Shared HMAC key for token-based authentication (cross-platform).
 	// Loaded from auth_key file at startup; used by AuthToken handler.
 	authKey []byte
+
+	// Accounting logger (TORQUE-compatible records in server_priv/accounting/)
+	acctLog *acct.Logger
 
 	// Scheduling
 	schedTicker *time.Ticker
@@ -94,6 +98,14 @@ func New(cfg *Config) (*Server, error) {
 		nodeMgr:  node.NewManager(),
 		state:    SvStateInit,
 		done:     make(chan struct{}),
+	}
+
+	// Initialize accounting logger
+	al, err := acct.NewLogger(icfg.AcctDir)
+	if err != nil {
+		log.Printf("[SERVER] Warning: cannot open accounting log: %v", err)
+	} else {
+		s.acctLog = al
 	}
 
 	return s, nil
@@ -160,7 +172,51 @@ func (s *Server) Shutdown() {
 
 	// Save all state to disk before exiting
 	s.saveState()
+	if s.acctLog != nil {
+		s.acctLog.Close()
+	}
 	log.Printf("[SERVER] Shutdown complete")
+}
+
+// buildJobInfo creates an acct.JobInfo from a job (caller must hold at least RLock).
+func (s *Server) buildJobInfo(j *job.Job) *acct.JobInfo {
+	info := &acct.JobInfo{
+		User:         j.Owner,
+		Group:        j.EGroup,
+		JobName:      j.Name,
+		Queue:        j.Queue,
+		CreateTime:   j.CreateTime.Unix(),
+		QueueTime:    j.QueueTime.Unix(),
+		EligTime:     j.QueueTime.Unix(), // eligible time defaults to queue time
+		ExitStatus:   j.ExitStatus,
+		ExecHost:     j.ExecHost,
+		SessionID:    j.SessionID,
+		ResourceReq:  copyMap(j.ResourceReq),
+		ResourceUsed: copyMap(j.ResourceUsed),
+	}
+	if !j.StartTime.IsZero() {
+		info.StartTime = j.StartTime.Unix()
+		info.EligTime = j.StartTime.Unix()
+	}
+	if !j.CompTime.IsZero() {
+		info.EndTime = j.CompTime.Unix()
+	}
+	if v, ok := j.Attrs["Account_Name"]; ok {
+		info.Account = v
+	}
+	return info
+}
+
+// copyMap returns a shallow copy of a string map, or nil if empty.
+func copyMap(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 // ensureDirectories creates required directories if they don't exist.
@@ -616,6 +672,14 @@ func (s *Server) handleJobScript(conn net.Conn, r *dis.Reader, hdr *dis.RequestH
 		}
 		s.saveJob(j)
 		log.Printf("[SERVER] Auto-committed job %s to queue %s", jobID, j.Queue)
+
+		// Write Q (queued) accounting record
+		if s.acctLog != nil {
+			j.Mu.RLock()
+			info := s.buildJobInfo(j)
+			j.Mu.RUnlock()
+			s.acctLog.RecordQueued(jobID, info)
+		}
 	}
 
 	dis.SendOkReply(conn)
@@ -668,6 +732,15 @@ func (s *Server) handleCommit(conn net.Conn, r *dis.Reader, hdr *dis.RequestHead
 	s.saveJob(j)
 
 	log.Printf("[SERVER] Commit job %s to queue %s", jobID, queueName)
+
+	// Write Q (queued) accounting record
+	if s.acctLog != nil {
+		j.Mu.RLock()
+		info := s.buildJobInfo(j)
+		j.Mu.RUnlock()
+		s.acctLog.RecordQueued(jobID, info)
+	}
+
 	dis.SendJobIDReply(conn, dis.ReplyChoiceCommit, jobID)
 	return true
 }
@@ -724,6 +797,14 @@ func (s *Server) handleDeleteJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestH
 	state := j.State
 	queueName := j.Queue
 	j.Mu.Unlock()
+
+	// Write D (deleted) accounting record before removing the job
+	if s.acctLog != nil {
+		j.Mu.RLock()
+		info := s.buildJobInfo(j)
+		j.Mu.RUnlock()
+		s.acctLog.RecordDeleted(jobID, info)
+	}
 
 	// If running, we would need to signal the MOM to kill it
 	if state == job.StateRunning {
@@ -954,6 +1035,15 @@ func (s *Server) handleRunJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestHead
 		}
 		s.saveJob(j)
 		log.Printf("[SERVER] RunJob %s dispatched to %s by external scheduler", jobID, dest)
+
+		// Write S (started) accounting record
+		if s.acctLog != nil {
+			j.Mu.RLock()
+			info := s.buildJobInfo(j)
+			j.Mu.RUnlock()
+			s.acctLog.RecordStarted(jobID, info)
+		}
+
 		go s.dispatchJobToMOM(j, n)
 	} else {
 		// No destination — use built-in placement
@@ -1369,6 +1459,20 @@ func (s *Server) handleJobObit(conn net.Conn, r *dis.Reader, hdr *dis.RequestHea
 	s.saveJob(j)
 
 	log.Printf("[SERVER] JobObit: %s exit=%d (was state=%d)", jobID, exitStatus, oldState)
+
+	// Write E (ended) accounting record with full resource usage
+	if s.acctLog != nil {
+		j.Mu.RLock()
+		j.CompTime = time.Now()
+		info := s.buildJobInfo(j)
+		j.Mu.RUnlock()
+		if exitStatus < 0 || exitStatus > 128 {
+			s.acctLog.RecordAborted(jobID, info)
+		} else {
+			s.acctLog.RecordEnded(jobID, info)
+		}
+	}
+
 	dis.SendOkReply(conn)
 	return true
 }
@@ -2578,6 +2682,14 @@ func (s *Server) scheduleJob(j *job.Job) {
 	s.saveJob(j)
 
 	log.Printf("[SCHED] Dispatching job %s to %s (port %d)", j.ID, execHost, momPort)
+
+	// Write S (started) accounting record
+	if s.acctLog != nil {
+		j.Mu.RLock()
+		info := s.buildJobInfo(j)
+		j.Mu.RUnlock()
+		s.acctLog.RecordStarted(j.ID, info)
+	}
 
 	// Send job to MOM in a background goroutine
 	go s.dispatchJobToMOM(j, n)

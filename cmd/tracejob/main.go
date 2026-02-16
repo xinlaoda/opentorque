@@ -76,6 +76,14 @@ func main() {
 		}
 	}
 
+	// Search accounting logs (server_priv/accounting/)
+	if searchAll {
+		acctLogs := findLogFiles(filepath.Join(*pbsHome, "server_priv", "accounting"), *days)
+		for _, f := range acctLogs {
+			entries = append(entries, searchAcctLog(f, jobID, shortID)...)
+		}
+	}
+
 	// Also search common log locations
 	if searchAll {
 		// Search /tmp for any server, mom, sched log files
@@ -248,4 +256,49 @@ func matchWithBoundary(line, pattern string) bool {
 
 func isIDChar(b byte) bool {
 	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_'
+}
+
+// searchAcctLog searches an accounting file for records matching the job ID.
+// Accounting format: MM/DD/YYYY HH:MM:SS;TYPE;JOB_ID;key=value ...
+// The job ID field is the third semicolon-delimited field, so we match exactly.
+func searchAcctLog(path, fullID, shortID string) []logEntry {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	// Map accounting record types to human-readable labels
+	typeMap := map[string]string{
+		"Q": "Queued", "S": "Started", "E": "Ended",
+		"D": "Deleted", "A": "Aborted", "R": "Rerun",
+	}
+
+	var entries []logEntry
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		// Parse: timestamp;type;jobid;message
+		parts := strings.SplitN(line, ";", 4)
+		if len(parts) < 4 {
+			continue
+		}
+		recJobID := parts[2]
+		// Match full ID or short ID prefix
+		recShort := strings.Split(recJobID, ".")[0]
+		if recJobID != fullID && recShort != shortID {
+			continue
+		}
+		label := typeMap[parts[1]]
+		if label == "" {
+			label = parts[1]
+		}
+		ts := parts[0]
+		entries = append(entries, logEntry{
+			Source: "Acct",
+			Time:   ts,
+			Line:   fmt.Sprintf("[%s] %s", label, parts[3]),
+		})
+	}
+	return entries
 }
