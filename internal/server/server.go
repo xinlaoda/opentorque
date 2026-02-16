@@ -663,9 +663,18 @@ func (s *Server) handleJobScript(conn net.Conn, r *dis.Reader, hdr *dis.RequestH
 		// Transition via manager to update state counters
 		s.jobMgr.UpdateJobState(jobID, job.StateQueued, job.SubstateQueued)
 
+		// Apply hold or deferred execution after initial state transition
 		j.Mu.RLock()
+		holdTypes := j.HoldTypes
+		execTime := j.ExecutionTime
 		queueName := j.Queue
 		j.Mu.RUnlock()
+
+		if holdTypes != "" && holdTypes != "n" {
+			s.jobMgr.UpdateJobState(jobID, job.StateHeld, job.SubstateHeld)
+		} else if !execTime.IsZero() && execTime.After(time.Now()) {
+			s.jobMgr.UpdateJobState(jobID, job.StateWaiting, job.SubstateWaiting)
+		}
 
 		if q := s.queueMgr.GetQueue(queueName); q != nil {
 			q.IncrJobCount(job.StateQueued)
@@ -719,9 +728,18 @@ func (s *Server) handleCommit(conn net.Conn, r *dis.Reader, hdr *dis.RequestHead
 	// Transition job to Queued state via manager (updates state counters)
 	s.jobMgr.UpdateJobState(jobID, job.StateQueued, job.SubstateQueued)
 
+	// Apply hold or deferred execution after initial state transition
 	j.Mu.RLock()
+	holdTypes := j.HoldTypes
+	execTime := j.ExecutionTime
 	queueName := j.Queue
 	j.Mu.RUnlock()
+
+	if holdTypes != "" && holdTypes != "n" {
+		s.jobMgr.UpdateJobState(jobID, job.StateHeld, job.SubstateHeld)
+	} else if !execTime.IsZero() && execTime.After(time.Now()) {
+		s.jobMgr.UpdateJobState(jobID, job.StateWaiting, job.SubstateWaiting)
+	}
 
 	// Update queue counters
 	if q := s.queueMgr.GetQueue(queueName); q != nil {
@@ -1975,6 +1993,27 @@ func (s *Server) formatJobStatus(j *job.Job) dis.StatusObject {
 	add("Join_Path", j.JoinPath)
 	add("Keep_Files", j.KeepFiles)
 
+	// New attributes
+	add("Account_Name", j.Account)
+	add("Shell_Path_List", j.Shell)
+	add("Mail_Points", j.MailPoints)
+	add("Mail_Users", j.MailUsers)
+	add("Rerunable", j.Rerunnable)
+	add("Hold_Types", j.HoldTypes)
+	add("User_List", j.UserList)
+	add("depend", j.DependList)
+	add("stagein", j.StageinList)
+	add("stageout", j.StageoutList)
+	add("job_array_request", j.JobArrayReq)
+	add("init_work_dir", j.InitWorkDir)
+	add("comment", j.Comment)
+	if j.Priority != 0 {
+		add("Priority", strconv.Itoa(j.Priority))
+	}
+	if !j.ExecutionTime.IsZero() {
+		add("Execution_Time", strconv.FormatInt(j.ExecutionTime.Unix(), 10))
+	}
+
 	// Execution info
 	add("exec_host", j.ExecHost)
 	if j.ExecPort > 0 {
@@ -2446,6 +2485,48 @@ func (s *Server) applyJobAttrs(j *job.Job, attrs []dis.SvrAttrl) {
 			j.KeepFiles = a.Value
 		case "Checkpoint":
 			j.Checkpoint = a.Value
+		case "Shell_Path_List":
+			j.Shell = a.Value
+		case "Account_Name":
+			j.Account = a.Value
+		case "Mail_Points":
+			j.MailPoints = a.Value
+		case "Mail_Users":
+			j.MailUsers = a.Value
+		case "Priority":
+			fmt.Sscanf(a.Value, "%d", &j.Priority)
+		case "Rerunable":
+			j.Rerunnable = a.Value
+		case "Hold_Types":
+			j.HoldTypes = a.Value
+			// Apply hold: if hold types are set, transition to Held state
+			if a.Value != "" && a.Value != "n" {
+				j.SetState(job.StateHeld, job.SubstateHeld)
+			}
+		case "Execution_Time":
+			if ts, err := strconv.ParseInt(a.Value, 10, 64); err == nil {
+				j.ExecutionTime = time.Unix(ts, 0)
+				// Deferred execution: place in Waiting state if time is in the future
+				if j.ExecutionTime.After(time.Now()) {
+					j.SetState(job.StateWaiting, job.SubstateWaiting)
+				}
+			}
+		case "User_List":
+			j.UserList = a.Value
+		case "depend":
+			j.DependList = a.Value
+		case "stagein":
+			j.StageinList = a.Value
+		case "stageout":
+			j.StageoutList = a.Value
+		case "job_array_request":
+			j.JobArrayReq = a.Value
+		case "init_work_dir":
+			j.InitWorkDir = a.Value
+		case "init_root_dir":
+			j.RootDir = a.Value
+		case "comment":
+			j.Comment = a.Value
 		case "euser":
 			j.EUser = a.Value
 		case "egroup":
@@ -2611,7 +2692,11 @@ func (s *Server) schedulerLoop() {
 
 // runScheduler is the built-in FIFO job scheduler.
 // It iterates through queued jobs and dispatches them to free nodes.
+// It also promotes Waiting jobs whose execution time has passed.
 func (s *Server) runScheduler() {
+	// Check for Waiting jobs whose deferred execution time has passed
+	s.promoteWaitingJobs()
+
 	queued := s.jobMgr.QueuedJobs()
 	if len(queued) == 0 {
 		return
@@ -2631,6 +2716,24 @@ func (s *Server) runScheduler() {
 		j.Mu.RUnlock()
 
 		s.scheduleJob(j)
+	}
+}
+
+// promoteWaitingJobs transitions jobs from Waiting to Queued state
+// when their deferred execution time (-a) has passed.
+func (s *Server) promoteWaitingJobs() {
+	now := time.Now()
+	for _, j := range s.jobMgr.AllJobs() {
+		j.Mu.RLock()
+		state := j.State
+		execTime := j.ExecutionTime
+		jobID := j.ID
+		j.Mu.RUnlock()
+
+		if state == job.StateWaiting && !execTime.IsZero() && now.After(execTime) {
+			s.jobMgr.UpdateJobState(jobID, job.StateQueued, job.SubstateQueued)
+			log.Printf("[SCHED] Job %s execution time reached, moved to Queued", jobID)
+		}
 	}
 }
 

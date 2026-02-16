@@ -65,16 +65,18 @@ type Job struct {
 	ExitStatus int
 
 	// Timing
-	CreateTime time.Time
-	QueueTime  time.Time
-	StartTime  time.Time
-	CompTime   time.Time
-	ModifyTime time.Time
-	MTime      time.Time // Last modification
+	CreateTime    time.Time
+	QueueTime     time.Time
+	StartTime     time.Time
+	CompTime      time.Time
+	ModifyTime    time.Time
+	MTime         time.Time // Last modification
+	ExecutionTime time.Time // -a: deferred execution time
 
 	// Script
 	Script     string // Script content
 	ScriptFile string // Path on disk
+	ScriptArgs string // -F: arguments passed to script
 
 	// Paths
 	StdoutPath string // Output_Path
@@ -87,9 +89,11 @@ type Job struct {
 	ResourceUsed map[string]string // resources_used (actual)
 
 	// User info
-	EUser   string // Effective user
-	EGroup  string // Effective group
-	Shell   string // Job shell
+	EUser     string // Effective user
+	EGroup    string // Effective group
+	Shell     string // Job shell (-S)
+	UserList  string // -u: user list for job ownership
+	Account   string // -A: account string
 
 	// Attributes (generic key-value for extensibility)
 	Attrs map[string]string
@@ -102,6 +106,17 @@ type Job struct {
 	FaultTolerant string
 	JobRadix      string
 	ReqVersion    string
+	Priority      int    // -p: job priority (-1024 to 1023)
+	Rerunnable    string // -r: y or n
+	MailPoints    string // -m: mail event flags
+	MailUsers     string // -M: mail recipient list
+	Comment       string // job comment
+	DependList    string // -W depend=: job dependencies
+	StageinList   string // -W stagein=: file staging
+	StageoutList  string // -W stageout=: file staging
+	JobArrayReq   string // -t: job array range
+	InitWorkDir   string // -d: initial working directory
+	RootDir       string // -D: root (chroot) directory
 
 	// Node assignment
 	NodeCount  int
@@ -111,6 +126,8 @@ type Job struct {
 	// Flags
 	Modified  bool
 	FromRoute bool // Job came via routing
+	HoldTypes string // -h: hold types (u=user, o=other, s=system)
+	Interactive bool // -I: interactive job
 }
 
 // NewJob creates a new Job with initialized maps and default state.
