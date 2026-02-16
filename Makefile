@@ -4,7 +4,7 @@ VERSION ?= 0.1.0
 LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 
 DAEMONS := pbs_server pbs_mom pbs_sched
-CLI_TOOLS := qsub qstat qdel qhold qrls pbsnodes qmgr
+CLI_TOOLS := qsub qstat qdel qhold qrls pbsnodes qmgr qalter qrun qrerun qmove qorder qsig qmsg qstart qstop qenable qdisable qterm qselect qchkpt
 
 .PHONY: all server mom sched cli clean install test fmt vet
 

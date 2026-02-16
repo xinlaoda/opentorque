@@ -561,6 +561,313 @@ func (c *Conn) Manager(cmd, objType int, objName string, attrs []dis.SvrAttrl) e
 	return nil
 }
 
+// ModifyJob sends a modify-job request to change job attributes (qalter).
+// Body format matches server's ReadModifyJobBody: uint(cmd) uint(objtype) string(jobid) svrattrl
+func (c *Conn) ModifyJob(jobID string, attrs []dis.SvrAttrl) error {
+	c.conn.SetWriteDeadline(time.Now().Add(requestTimeout))
+	if err := c.writeHeader(dis.BatchReqModifyJob); err != nil {
+		return err
+	}
+	if err := c.writer.WriteUint(0); err != nil { // cmd (unused)
+		return err
+	}
+	if err := c.writer.WriteUint(uint64(dis.MgrObjJob)); err != nil { // objtype
+		return err
+	}
+	if err := c.writer.WriteString(jobID); err != nil {
+		return err
+	}
+	if err := dis.WriteSvrAttrl(c.writer, attrs); err != nil {
+		return err
+	}
+	if err := c.writer.WriteString(""); err != nil { // extension
+		return err
+	}
+	if err := c.writer.Flush(); err != nil {
+		return err
+	}
+	code, _, _, _, err := c.readReply()
+	if err != nil {
+		return fmt.Errorf("read modify reply: %w", err)
+	}
+	if code != 0 {
+		return fmt.Errorf("modify job rejected (code=%d)", code)
+	}
+	return nil
+}
+
+// RunJob sends a run-job request to force a job to run on a specific node (qrun).
+func (c *Conn) RunJob(jobID, destination string) error {
+	c.conn.SetWriteDeadline(time.Now().Add(requestTimeout))
+	if err := c.writeHeader(dis.BatchReqRunJob); err != nil {
+		return err
+	}
+	if err := c.writer.WriteString(jobID); err != nil {
+		return err
+	}
+	if err := c.writer.WriteString(destination); err != nil {
+		return err
+	}
+	if err := c.writer.WriteString(""); err != nil {
+		return err
+	}
+	if err := c.writer.Flush(); err != nil {
+		return err
+	}
+	code, _, _, _, err := c.readReply()
+	if err != nil {
+		return fmt.Errorf("read runjob reply: %w", err)
+	}
+	if code != 0 {
+		return fmt.Errorf("run job rejected (code=%d)", code)
+	}
+	return nil
+}
+
+// SignalJob sends a signal to a running job (qsig).
+func (c *Conn) SignalJob(jobID, signal string) error {
+	c.conn.SetWriteDeadline(time.Now().Add(requestTimeout))
+	if err := c.writeHeader(dis.BatchReqSignalJob); err != nil {
+		return err
+	}
+	if err := c.writer.WriteString(jobID); err != nil {
+		return err
+	}
+	if err := c.writer.WriteString(signal); err != nil {
+		return err
+	}
+	if err := c.writer.WriteString(""); err != nil {
+		return err
+	}
+	if err := c.writer.Flush(); err != nil {
+		return err
+	}
+	code, _, _, _, err := c.readReply()
+	if err != nil {
+		return fmt.Errorf("read signal reply: %w", err)
+	}
+	if code != 0 {
+		return fmt.Errorf("signal job rejected (code=%d)", code)
+	}
+	return nil
+}
+
+// Shutdown sends a server shutdown request (qterm).
+func (c *Conn) Shutdown(manner int) error {
+	c.conn.SetWriteDeadline(time.Now().Add(requestTimeout))
+	if err := c.writeHeader(dis.BatchReqShutdown); err != nil {
+		return err
+	}
+	if err := c.writer.WriteUint(uint64(manner)); err != nil {
+		return err
+	}
+	if err := c.writer.WriteString(""); err != nil {
+		return err
+	}
+	if err := c.writer.Flush(); err != nil {
+		return err
+	}
+	code, _, _, _, err := c.readReply()
+	if err != nil {
+		// Server may close connection during shutdown - that's OK
+		if strings.Contains(err.Error(), "EOF") || strings.Contains(err.Error(), "reset") {
+			return nil
+		}
+		return fmt.Errorf("read shutdown reply: %w", err)
+	}
+	if code != 0 {
+		return fmt.Errorf("shutdown rejected (code=%d)", code)
+	}
+	return nil
+}
+
+// SelectJobs returns job IDs matching the given selection attributes (qselect).
+// Body format: string(id) svrattrl (same as status body)
+func (c *Conn) SelectJobs(attrs []dis.SvrAttrl) ([]string, error) {
+	c.conn.SetWriteDeadline(time.Now().Add(requestTimeout))
+	if err := c.writeHeader(dis.BatchReqSelectJobs); err != nil {
+		return nil, err
+	}
+	if err := c.writer.WriteString(""); err != nil { // empty ID = all jobs
+		return nil, err
+	}
+	if err := dis.WriteSvrAttrl(c.writer, attrs); err != nil {
+		return nil, err
+	}
+	if err := c.writer.WriteString(""); err != nil { // extension
+		return nil, err
+	}
+	if err := c.writer.Flush(); err != nil {
+		return nil, err
+	}
+
+	c.conn.SetReadDeadline(time.Now().Add(requestTimeout))
+	code, _, _, data, err := c.readReply()
+	if err != nil {
+		return nil, fmt.Errorf("read select reply: %w", err)
+	}
+	if code != 0 {
+		return nil, fmt.Errorf("select jobs rejected (code=%d)", code)
+	}
+	// Parse text reply containing newline-separated job IDs
+	if data == "" {
+		return nil, nil
+	}
+	var ids []string
+	for _, id := range strings.Split(data, "\n") {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
+// MoveJob moves a job to a different queue or server (qmove).
+func (c *Conn) MoveJob(jobID, destination string) error {
+	c.conn.SetWriteDeadline(time.Now().Add(requestTimeout))
+	if err := c.writeHeader(dis.BatchReqMoveJob); err != nil {
+		return err
+	}
+	if err := c.writer.WriteString(jobID); err != nil {
+		return err
+	}
+	if err := c.writer.WriteString(destination); err != nil {
+		return err
+	}
+	if err := c.writer.WriteString(""); err != nil {
+		return err
+	}
+	if err := c.writer.Flush(); err != nil {
+		return err
+	}
+	code, _, _, _, err := c.readReply()
+	if err != nil {
+		return fmt.Errorf("read move reply: %w", err)
+	}
+	if code != 0 {
+		return fmt.Errorf("move job rejected (code=%d)", code)
+	}
+	return nil
+}
+
+// RerunJob requeues a running job back to queued state (qrerun).
+func (c *Conn) RerunJob(jobID string, force bool) error {
+	c.conn.SetWriteDeadline(time.Now().Add(requestTimeout))
+	if err := c.writeHeader(dis.BatchReqRerun); err != nil {
+		return err
+	}
+	if err := c.writer.WriteString(jobID); err != nil {
+		return err
+	}
+	// Extension: use WriteString("") for empty (compatible with ReadReqExtend)
+	// For force mode, pass flag in the extension field
+	if force {
+		if err := c.writer.WriteString("RERUNFORCE"); err != nil {
+			return err
+		}
+	} else {
+		if err := c.writer.WriteString(""); err != nil {
+			return err
+		}
+	}
+	if err := c.writer.Flush(); err != nil {
+		return err
+	}
+	code, _, _, _, err := c.readReply()
+	if err != nil {
+		return fmt.Errorf("read rerun reply: %w", err)
+	}
+	if code != 0 {
+		return fmt.Errorf("rerun job rejected (code=%d)", code)
+	}
+	return nil
+}
+
+// OrderJob swaps the order of two jobs in the queue (qorder).
+func (c *Conn) OrderJob(jobID1, jobID2 string) error {
+	c.conn.SetWriteDeadline(time.Now().Add(requestTimeout))
+	if err := c.writeHeader(dis.BatchReqOrderJob); err != nil {
+		return err
+	}
+	if err := c.writer.WriteString(jobID1); err != nil {
+		return err
+	}
+	if err := c.writer.WriteString(jobID2); err != nil {
+		return err
+	}
+	if err := c.writer.WriteString(""); err != nil {
+		return err
+	}
+	if err := c.writer.Flush(); err != nil {
+		return err
+	}
+	code, _, _, _, err := c.readReply()
+	if err != nil {
+		return fmt.Errorf("read order reply: %w", err)
+	}
+	if code != 0 {
+		return fmt.Errorf("order job rejected (code=%d)", code)
+	}
+	return nil
+}
+
+// MessJob sends a message to a job's output file (qmsg).
+func (c *Conn) MessJob(jobID string, fileOpt int, message string) error {
+	c.conn.SetWriteDeadline(time.Now().Add(requestTimeout))
+	if err := c.writeHeader(dis.BatchReqMessJob); err != nil {
+		return err
+	}
+	if err := c.writer.WriteString(jobID); err != nil {
+		return err
+	}
+	if err := c.writer.WriteUint(uint64(fileOpt)); err != nil {
+		return err
+	}
+	if err := c.writer.WriteString(message); err != nil {
+		return err
+	}
+	if err := c.writer.WriteString(""); err != nil {
+		return err
+	}
+	if err := c.writer.Flush(); err != nil {
+		return err
+	}
+	code, _, _, _, err := c.readReply()
+	if err != nil {
+		return fmt.Errorf("read messjob reply: %w", err)
+	}
+	if code != 0 {
+		return fmt.Errorf("message job rejected (code=%d)", code)
+	}
+	return nil
+}
+
+// CheckpointJob requests checkpoint of a running job (qchkpt).
+func (c *Conn) CheckpointJob(jobID string) error {
+	c.conn.SetWriteDeadline(time.Now().Add(requestTimeout))
+	if err := c.writeHeader(dis.BatchReqCheckpointJob); err != nil {
+		return err
+	}
+	if err := c.writer.WriteString(jobID); err != nil {
+		return err
+	}
+	if err := c.writer.WriteString(""); err != nil {
+		return err
+	}
+	if err := c.writer.Flush(); err != nil {
+		return err
+	}
+	code, _, _, _, err := c.readReply()
+	if err != nil {
+		return fmt.Errorf("read checkpoint reply: %w", err)
+	}
+	if code != 0 {
+		return fmt.Errorf("checkpoint job rejected (code=%d)", code)
+	}
+	return nil
+}
+
 // resolveServer determines the PBS server hostname from configuration.
 func resolveServer(pbsHome string) string {
 	// Check PBS_DEFAULT environment variable

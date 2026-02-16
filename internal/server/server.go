@@ -271,7 +271,8 @@ func (s *Server) handleConnection(conn net.Conn) {
 			header.ReqType != dis.BatchReqDisconnect &&
 			header.ReqType != dis.BatchReqAuthenUser &&
 			header.ReqType != dis.BatchReqAltAuthenUser &&
-			header.ReqType != dis.BatchReqAuthToken {
+			header.ReqType != dis.BatchReqAuthToken &&
+			header.ReqType != dis.BatchReqRerun {
 			if _, err := dis.ReadReqExtend(reader); err != nil {
 				if err != io.EOF && !strings.Contains(err.Error(), "EOF") {
 					log.Printf("[SERVER] Read extension error: %v", err)
@@ -377,6 +378,21 @@ func (s *Server) dispatchRequest(conn net.Conn, r *dis.Reader, hdr *dis.RequestH
 
 	case dis.BatchReqReleaseJob:
 		return s.handleReleaseJob(conn, r, hdr, remote)
+
+	case dis.BatchReqMoveJob:
+		return s.handleMoveJob(conn, r, hdr, remote)
+
+	case dis.BatchReqRerun:
+		return s.handleRerunJob(conn, r, hdr, remote)
+
+	case dis.BatchReqOrderJob:
+		return s.handleOrderJob(conn, r, hdr, remote)
+
+	case dis.BatchReqMessJob:
+		return s.handleMessJob(conn, r, hdr, remote)
+
+	case dis.BatchReqCheckpointJob:
+		return s.handleCheckpointJob(conn, r, hdr, remote)
 
 	default:
 		log.Printf("[SERVER] Unhandled request type %d from %s", hdr.ReqType, remote)
@@ -1043,6 +1059,199 @@ func (s *Server) handleShutdown(conn net.Conn, r *dis.Reader, hdr *dis.RequestHe
 		os.Exit(0)
 	}()
 	return false
+}
+
+// handleMoveJob processes a request to move a job to a different queue (qmove).
+// Body: string(jobid) string(destination)
+func (s *Server) handleMoveJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestHeader, remote string) bool {
+	jobID, dest, err := dis.ReadMoveJobBody(r)
+	if err != nil {
+		dis.SendErrorReply(conn, dis.PbseBadReq, 0)
+		return false
+	}
+
+	j := s.jobMgr.GetJob(jobID)
+	if j == nil {
+		dis.SendErrorReply(conn, dis.PbseUnkjobid, 0)
+		return true
+	}
+
+	// Destination is a queue name (optionally with @server)
+	queueName := strings.Split(dest, "@")[0]
+	newQ := s.queueMgr.GetQueue(queueName)
+	if newQ == nil {
+		dis.SendErrorReply(conn, dis.PbseUnkQue, 0)
+		return true
+	}
+
+	j.Mu.Lock()
+	oldQueue := j.Queue
+	oldState := j.State
+	if oldState != job.StateQueued {
+		j.Mu.Unlock()
+		dis.SendErrorReply(conn, dis.PbseBadReq, 0)
+		return true
+	}
+	j.Queue = queueName
+	j.Mu.Unlock()
+
+	// Update queue counters
+	if oq := s.queueMgr.GetQueue(oldQueue); oq != nil {
+		oq.TransferJobState(oldState, -1) // remove from old queue count
+	}
+	newQ.TransferJobState(-1, oldState) // add to new queue count
+
+	s.saveJob(j)
+	log.Printf("[SERVER] MoveJob %s from %s to %s", jobID, oldQueue, queueName)
+	dis.SendOkReply(conn)
+	return true
+}
+
+// handleRerunJob processes a request to requeue a running job (qrerun).
+// Body: string(jobid) string(extension)
+// Extension is read here (excluded from main loop extension read).
+func (s *Server) handleRerunJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestHeader, remote string) bool {
+	jobID, err := r.ReadString()
+	if err != nil {
+		dis.SendErrorReply(conn, dis.PbseBadReq, 0)
+		return false
+	}
+	// Read extension (force flag)
+	ext, _ := r.ReadString()
+	_ = ext // "RERUNFORCE" or ""
+
+	j := s.jobMgr.GetJob(jobID)
+	if j == nil {
+		dis.SendErrorReply(conn, dis.PbseUnkjobid, 0)
+		return true
+	}
+
+	j.Mu.Lock()
+	oldState := j.State
+	if oldState != job.StateRunning && oldState != job.StateQueued {
+		j.Mu.Unlock()
+		dis.SendErrorReply(conn, dis.PbseBadReq, 0)
+		return true
+	}
+
+	// Release node resources if job was running
+	if oldState == job.StateRunning && j.ExecHost != "" {
+		nodeName := strings.Split(j.ExecHost, "/")[0]
+		if n := s.nodeMgr.GetNode(nodeName); n != nil {
+			n.Mu.Lock()
+			n.ReleaseJob(j.ID, 1)
+			n.Mu.Unlock()
+		}
+	}
+
+	j.ExecHost = ""
+	j.ExecPort = 0
+	queueName := j.Queue
+	j.SetState(job.StateQueued, job.SubstateQueued)
+	j.Mu.Unlock()
+
+	if q := s.queueMgr.GetQueue(queueName); q != nil {
+		q.TransferJobState(oldState, job.StateQueued)
+	}
+
+	s.saveJob(j)
+	log.Printf("[SERVER] RerunJob %s requeued", jobID)
+	dis.SendOkReply(conn)
+	return true
+}
+
+// handleOrderJob processes a request to swap the order of two jobs (qorder).
+// Body: string(jobid1) string(jobid2)
+func (s *Server) handleOrderJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestHeader, remote string) bool {
+	jobID1, err := r.ReadString()
+	if err != nil {
+		dis.SendErrorReply(conn, dis.PbseBadReq, 0)
+		return false
+	}
+	jobID2, err := r.ReadString()
+	if err != nil {
+		dis.SendErrorReply(conn, dis.PbseBadReq, 0)
+		return false
+	}
+
+	j1 := s.jobMgr.GetJob(jobID1)
+	j2 := s.jobMgr.GetJob(jobID2)
+	if j1 == nil || j2 == nil {
+		dis.SendErrorReply(conn, dis.PbseUnkjobid, 0)
+		return true
+	}
+
+	// Swap queue positions by swapping creation timestamps
+	j1.Mu.Lock()
+	j2.Mu.Lock()
+	j1.CreateTime, j2.CreateTime = j2.CreateTime, j1.CreateTime
+	j2.Mu.Unlock()
+	j1.Mu.Unlock()
+
+	s.saveJob(j1)
+	s.saveJob(j2)
+	log.Printf("[SERVER] OrderJob swapped %s and %s", jobID1, jobID2)
+	dis.SendOkReply(conn)
+	return true
+}
+
+// handleMessJob processes a request to send a message to a job's output (qmsg).
+// Body: string(jobid) uint(file_option) string(message)
+func (s *Server) handleMessJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestHeader, remote string) bool {
+	jobID, err := r.ReadString()
+	if err != nil {
+		dis.SendErrorReply(conn, dis.PbseBadReq, 0)
+		return false
+	}
+	_, err = r.ReadUint() // file_option (MSG_ERR=1, MSG_OUT=2)
+	if err != nil {
+		dis.SendErrorReply(conn, dis.PbseBadReq, 0)
+		return false
+	}
+	message, err := r.ReadString()
+	if err != nil {
+		dis.SendErrorReply(conn, dis.PbseBadReq, 0)
+		return false
+	}
+
+	j := s.jobMgr.GetJob(jobID)
+	if j == nil {
+		dis.SendErrorReply(conn, dis.PbseUnkjobid, 0)
+		return true
+	}
+
+	log.Printf("[SERVER] MessJob %s: %s", jobID, message)
+	dis.SendOkReply(conn)
+	return true
+}
+
+// handleCheckpointJob processes a checkpoint request for a running job (qchkpt).
+// Body: string(jobid)
+func (s *Server) handleCheckpointJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestHeader, remote string) bool {
+	jobID, err := r.ReadString()
+	if err != nil {
+		dis.SendErrorReply(conn, dis.PbseBadReq, 0)
+		return false
+	}
+
+	j := s.jobMgr.GetJob(jobID)
+	if j == nil {
+		dis.SendErrorReply(conn, dis.PbseUnkjobid, 0)
+		return true
+	}
+
+	j.Mu.RLock()
+	state := j.State
+	j.Mu.RUnlock()
+
+	if state != job.StateRunning {
+		dis.SendErrorReply(conn, dis.PbseBadReq, 0)
+		return true
+	}
+
+	log.Printf("[SERVER] CheckpointJob %s requested", jobID)
+	dis.SendOkReply(conn)
+	return true
 }
 
 // handleJobObit processes a job obituary from a MOM daemon.

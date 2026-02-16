@@ -25,9 +25,11 @@ const (
 	BatchReqHoldJob      = 7
 	BatchReqLocateJob    = 8
 	BatchReqManager      = 9
+	BatchReqMessJob      = 10
 	BatchReqModifyJob    = 11
 	BatchReqMoveJob      = 12
 	BatchReqReleaseJob   = 13
+	BatchReqRerun        = 14
 	BatchReqRunJob       = 15
 	BatchReqSelectJobs   = 16
 	BatchReqShutdown     = 17
@@ -36,9 +38,11 @@ const (
 	BatchReqStatusQueue  = 20
 	BatchReqStatusServer = 21
 	BatchReqQueueJob2    = 29
+	BatchReqCheckpointJob = 27
 	BatchReqCommit2      = 30
 	BatchReqJobScript2   = 31
 	BatchReqAuthenUser   = 49
+	BatchReqOrderJob     = 50
 	BatchReqStatusNode   = 58
 	BatchReqDisconnect   = 59
 	BatchReqAuthToken    = 63
