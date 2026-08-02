@@ -68,7 +68,8 @@ func (a *AzureCRP) getToken() (string, error) {
 	}
 
 	clientID := os.Getenv("AZURE_CLIENT_ID")
-	reqURL := IMDS_TOKEN_URL + "?resource=https%3A%2F%2Fmanagement.azure.com%2F"
+	// api-version is required by the IMDS identity endpoint.
+	reqURL := IMDS_TOKEN_URL + "?api-version=2018-02-01&resource=https%3A%2F%2Fmanagement.azure.com%2F"
 	if clientID != "" {
 		reqURL += "&client_id=" + clientID
 	}
