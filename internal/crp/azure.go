@@ -55,8 +55,14 @@ func (a *AzureCRP) Name() string { return "azure" }
 // IMDS_TOKEN_URL is the Azure Instance Metadata Service identity endpoint.
 const IMDS_TOKEN_URL = "http://169.254.169.254/metadata/identity/oauth2/token"
 
-// apiVersion for Azure Compute / VM operations.
-const apiVersion = "2023-03-01"
+// computeAPIVersion for Azure Compute / VM operations.
+const computeAPIVersion = "2023-03-01"
+
+// networkAPIVersion is used for Microsoft.Network resource operations. It is
+// intentionally different from computeAPIVersion because some Azure regions do
+// not expose 2023-03-01 for network resources (e.g. networkInterfaces), which
+// would cause "API version not supported" errors at NIC creation time.
+const networkAPIVersion = "2024-07-01"
 
 // getToken obtains a bearer token from IMDS using the instance's managed
 // identity. If AZURE_CLIENT_ID is set it requests the user-assigned identity
@@ -132,6 +138,13 @@ func (a *AzureCRP) doAPI(method, path string, body any) ([]byte, int, error) {
 			return nil, 0, fmt.Errorf("marshal body: %w", err)
 		}
 		buf = bytes.NewReader(b)
+	}
+
+	// Select the API version based on the resource provider in the path so we
+	// use a version that each resource type actually supports in the region.
+	apiVersion := computeAPIVersion
+	if strings.Contains(path, "/providers/Microsoft.Network/") {
+		apiVersion = networkAPIVersion
 	}
 
 	url := "https://management.azure.com" + path
