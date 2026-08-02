@@ -2171,6 +2171,47 @@ func (s *Server) formatQueueStatus(q *queue.Queue) dis.StatusObject {
 		attrs = append(attrs, dis.SvrAttrl{Name: "resources_default", HasResc: true, Resc: k, Value: v, Op: 1})
 	}
 
+	// Cloud elasticity attributes
+	if q.CloudProvider != "" {
+		add("cloud_provider", q.CloudProvider)
+	}
+	if q.CloudVMSKU != "" {
+		add("cloud_vm_sku", q.CloudVMSKU)
+	}
+	if q.CloudMinNodes > 0 {
+		add("cloud_min_nodes", strconv.Itoa(q.CloudMinNodes))
+	}
+	if q.CloudMaxNodes > 0 {
+		add("cloud_max_nodes", strconv.Itoa(q.CloudMaxNodes))
+	}
+	if q.CloudIdleTime > 0 {
+		add("cloud_idle_time", strconv.Itoa(q.CloudIdleTime))
+	}
+	if q.CloudReclaim != "" {
+		add("cloud_reclaim", q.CloudReclaim)
+	}
+	if q.CloudSubnetID != "" {
+		add("cloud_subnet_id", q.CloudSubnetID)
+	}
+	if q.CloudImageID != "" {
+		add("cloud_image_id", q.CloudImageID)
+	}
+	if q.CloudDiskSize > 0 {
+		add("cloud_disk_size", strconv.Itoa(q.CloudDiskSize))
+	}
+	if q.CloudDiskType != "" {
+		add("cloud_disk_type", q.CloudDiskType)
+	}
+	if q.CloudSSHKey != "" {
+		add("cloud_ssh_key", q.CloudSSHKey)
+	}
+	if q.CloudLocation != "" {
+		add("cloud_location", q.CloudLocation)
+	}
+	if q.CloudRgName != "" {
+		add("cloud_rg_name", q.CloudRgName)
+	}
+
 	return dis.StatusObject{Type: dis.MgrObjQueue, Name: q.Name, Attrs: attrs}
 }
 
@@ -2671,6 +2712,32 @@ func (s *Server) applyQueueAttrs(q *queue.Queue, attrs []dis.SvrAttrl) {
 			if a.HasResc {
 				q.ResourceDflt[a.Resc] = a.Value
 			}
+		case "cloud_provider":
+			q.CloudProvider = strings.ToLower(a.Value)
+		case "cloud_vm_sku":
+			q.CloudVMSKU = a.Value
+		case "cloud_min_nodes":
+			fmt.Sscanf(a.Value, "%d", &q.CloudMinNodes)
+		case "cloud_max_nodes":
+			fmt.Sscanf(a.Value, "%d", &q.CloudMaxNodes)
+		case "cloud_idle_time":
+			fmt.Sscanf(a.Value, "%d", &q.CloudIdleTime)
+		case "cloud_reclaim":
+			q.CloudReclaim = strings.ToLower(a.Value)
+		case "cloud_subnet_id":
+			q.CloudSubnetID = a.Value
+		case "cloud_image_id":
+			q.CloudImageID = a.Value
+		case "cloud_disk_size":
+			fmt.Sscanf(a.Value, "%d", &q.CloudDiskSize)
+		case "cloud_disk_type":
+			q.CloudDiskType = a.Value
+		case "cloud_ssh_key":
+			q.CloudSSHKey = a.Value
+		case "cloud_location":
+			q.CloudLocation = a.Value
+		case "cloud_rg_name":
+			q.CloudRgName = a.Value
 		default:
 			q.Attrs[a.Name] = a.Value
 		}
@@ -3929,6 +3996,32 @@ func (s *Server) recoverQueues() {
 						q.Enabled = (val == "True")
 					case "started":
 						q.Started = (val == "True")
+					case "cloud_provider":
+						q.CloudProvider = strings.ToLower(val)
+					case "cloud_vm_sku":
+						q.CloudVMSKU = val
+					case "cloud_min_nodes":
+						fmt.Sscanf(val, "%d", &q.CloudMinNodes)
+					case "cloud_max_nodes":
+						fmt.Sscanf(val, "%d", &q.CloudMaxNodes)
+					case "cloud_idle_time":
+						fmt.Sscanf(val, "%d", &q.CloudIdleTime)
+					case "cloud_reclaim":
+						q.CloudReclaim = strings.ToLower(val)
+					case "cloud_subnet_id":
+						q.CloudSubnetID = val
+					case "cloud_image_id":
+						q.CloudImageID = val
+					case "cloud_disk_size":
+						fmt.Sscanf(val, "%d", &q.CloudDiskSize)
+					case "cloud_disk_type":
+						q.CloudDiskType = val
+					case "cloud_ssh_key":
+						q.CloudSSHKey = val
+					case "cloud_location":
+						q.CloudLocation = val
+					case "cloud_rg_name":
+						q.CloudRgName = val
 					}
 				}
 			}
@@ -4230,6 +4323,47 @@ func (s *Server) saveQueue(q *queue.Queue) {
 		sb.WriteString("started=True\n")
 	} else {
 		sb.WriteString("started=False\n")
+	}
+
+	// Cloud elasticity attributes
+	if q.CloudProvider != "" {
+		sb.WriteString("cloud_provider=" + q.CloudProvider + "\n")
+	}
+	if q.CloudVMSKU != "" {
+		sb.WriteString("cloud_vm_sku=" + q.CloudVMSKU + "\n")
+	}
+	if q.CloudMinNodes > 0 {
+		sb.WriteString(fmt.Sprintf("cloud_min_nodes=%d\n", q.CloudMinNodes))
+	}
+	if q.CloudMaxNodes > 0 {
+		sb.WriteString(fmt.Sprintf("cloud_max_nodes=%d\n", q.CloudMaxNodes))
+	}
+	if q.CloudIdleTime > 0 {
+		sb.WriteString(fmt.Sprintf("cloud_idle_time=%d\n", q.CloudIdleTime))
+	}
+	if q.CloudReclaim != "" {
+		sb.WriteString("cloud_reclaim=" + q.CloudReclaim + "\n")
+	}
+	if q.CloudSubnetID != "" {
+		sb.WriteString("cloud_subnet_id=" + q.CloudSubnetID + "\n")
+	}
+	if q.CloudImageID != "" {
+		sb.WriteString("cloud_image_id=" + q.CloudImageID + "\n")
+	}
+	if q.CloudDiskSize > 0 {
+		sb.WriteString(fmt.Sprintf("cloud_disk_size=%d\n", q.CloudDiskSize))
+	}
+	if q.CloudDiskType != "" {
+		sb.WriteString("cloud_disk_type=" + q.CloudDiskType + "\n")
+	}
+	if q.CloudSSHKey != "" {
+		sb.WriteString("cloud_ssh_key=" + q.CloudSSHKey + "\n")
+	}
+	if q.CloudLocation != "" {
+		sb.WriteString("cloud_location=" + q.CloudLocation + "\n")
+	}
+	if q.CloudRgName != "" {
+		sb.WriteString("cloud_rg_name=" + q.CloudRgName + "\n")
 	}
 
 	path := filepath.Join(s.cfg.QueuesDir, q.Name)

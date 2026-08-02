@@ -52,6 +52,24 @@ type Queue struct {
 
 	// Internal
 	Modified bool
+
+	// Cloud elasticity (queue-driven burst) attributes.
+	// When CloudProvider is non-empty the queue is treated as a cloud-backed
+	// pool: an external Cloud Resource Provider (CRP) provisions/deprovisions
+	// worker VMs on demand (see docs/cloud-elastic-event-driven-design.md).
+	CloudProvider  string // cloud name: "azure" | "aws" | "" (static pool)
+	CloudVMSKU     string // VM size/family, e.g. "Standard_D8s_v3"
+	CloudMinNodes  int    // floor: nodes kept scaled-in
+	CloudMaxNodes  int    // cap: max nodes the queue may scale to (0 = unlimited)
+	CloudIdleTime  int    // seconds idle before a node becomes a scale-in candidate
+	CloudReclaim   string // "deallocate" | "hibernate"
+	CloudSubnetID  string // Azure subnet resource ID where worker VMs are placed
+	CloudImageID   string // OS image: id, urn, or shared-image-gallery reference
+	CloudDiskSize  int    // OS disk size in GB (0 = provider default)
+	CloudDiskType  string // OS disk type, e.g. "Premium_LRS" (optional)
+	CloudSSHKey    string // authorized SSH public key for worker VMs
+	CloudLocation  string // Azure region for worker VM creation ("" = server region)
+	CloudRgName    string // Azure resource group for worker VMs ("" = server rg)
 }
 
 // NewQueue creates a new queue with defaults.
