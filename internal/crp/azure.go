@@ -87,9 +87,11 @@ func (a *AzureCRP) getToken() (string, error) {
 		return "", fmt.Errorf("IMDS token: HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
+	// IMDS returns expires_in as a string (e.g. "86399"); tolerate both string
+	// and numeric encodings via json.RawMessage.
 	var tr struct {
-		AccessToken  string `json:"access_token"`
-		ExpiresIn    int    `json:"expires_in"`
+		AccessToken string          `json:"access_token"`
+		ExpiresIn   json.RawMessage `json:"expires_in"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
 		return "", fmt.Errorf("IMDS token decode: %w", err)
@@ -97,8 +99,19 @@ func (a *AzureCRP) getToken() (string, error) {
 	if tr.AccessToken == "" {
 		return "", fmt.Errorf("IMDS token: empty access_token")
 	}
+	// Default expiry window (60 min) and refine from expires_in when present.
+	exp := 3600
+	if len(tr.ExpiresIn) > 0 {
+		var secs int
+		if err := json.Unmarshal(tr.ExpiresIn, &secs); err == nil && secs > 0 {
+			exp = secs
+		}
+	}
 	a.token = tr.AccessToken
-	a.tokenExpiry = time.Now().Add(time.Duration(tr.ExpiresIn-60) * time.Second)
+	if exp > 60 {
+		exp -= 60
+	}
+	a.tokenExpiry = time.Now().Add(time.Duration(exp) * time.Second)
 	return a.token, nil
 }
 
