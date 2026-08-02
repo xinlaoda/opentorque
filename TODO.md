@@ -94,11 +94,16 @@ on heterogeneous/multi-queue clusters.
 - Expected (TORQUE-compatible): accumulate all `-l` occurrences, or reject
   malformed input.
 
-### 2.4 [BUG] `qstat -f <completed-job-id>` returns `server error 15001`
-`qstat -f` works for queued jobs but fails with `PbseUnkjobid (15001)` for
-**completed** jobs, even though `qstat -a` lists them. Server log shows
-`Read proto error ... ReadUint: EOF`. Likely in `handleStatusJob` /
-`formatJobStatus` shutdown path for jobs already removed from in-memory store.
+### 2.4 [BUG] `qstat -f <job-id>` returns `server error 15001` for short IDs
+`qstat -f <jobnum>` (short job number, e.g. `qstat -f 10`) fails with
+`PbseUnkjobid (15001)`, while `qstat -f <jobnum>.<server>` (full ID, e.g.
+`qstat -f 10.xxin-opentorque-srv`) works for any state (queued/running/completed).
+Root cause: `handleStatusJob` looks up `jobMgr.GetJob(id)` by exact ID and no
+short-ID (`<jobnum>` -> `<jobnum>.<server>`) resolution exists on the server.
+`qdel`/`qrun` short IDs hit the same gap. The server log's
+`Read proto error ... ReadUint: EOF` is the client closing after receiving the
+15001 reply, not a server-side crash. Fix: resolve short ids against the
+`server_name` in the server request handlers (see also 2.5).
 
 ### 2.5 [BUG] `qrun <node> <job>` returns 15001
 The only way to force a job onto a specific node (`handleRunJob` with a `dest`)
@@ -362,6 +367,33 @@ Concrete work items to build the event-driven cloud elasticity (per
   `PROVISIONING` job state + job<->VM (`vm_id`) binding record (§12.2/12.3);
   CEC event-loop with in-flight guard and cooldown; CRP adapter interface stubs
   (`ensure/describe/reclaim/resume/health`) that return `vmID` before boot.
+  **[DONE -- implemented & integration-tested]** -- see 4.4a below.
+
+### 4.4a M1 test results (integration, RG `xxin-opentorque-test`, westus3)
+Validated live against the M1 stub CRP (`azure`) running inside `pbs_sched`:
+- Queue `batch` configured cloud-backed: `cloud_provider=azure`,
+  `cloud_vm_sku=Standard_D2s_v3`, `cloud_max_nodes=10`, `cloud_idle_time=300`,
+  `cloud_reclaim=deallocate`, `cloud_location=westus3`,
+  `cloud_rg_name=xxin-opentorque-test`.
+- Fill the two static nodes (4 cores) with 4 jobs, then queue 2 more: scheduler
+  logs `[SCHED] Cloud queue batch: job N needs 1 cores, no node available` per
+  blocked job and one merged `capacity event cores=2 nodes=1 blocked=2`.
+- Event forwarded to CEC -> `[CEC] ... scaling OUT by 1`; stub VM provisioned and
+  bound to the head job (`bound vm=azure-vm-N -> job=...`), `inflight=1`.
+- Cooldown + in-flight guard verified: later cycles log `no-op` / `in cooldown`
+  instead of over-provisioning. Static dispatch still works (jobs run on both
+  nodes across all free cores). No daemon restarts; server/mom/sched PIDs stable.
+- Job-state path confirmed in code: `StateProvisioning` (state 7, char `D`),
+  `ProvisionVM`/`ProvisionNode` round-trip the `.JB` file and survive restart
+  (PROVISIONING stays PROVISIONING for CEC reconcile); `formatJobStatus` emits
+  them so `qstat -f <full-id>` shows them. The real `PROVISIONING -> R` transition
+  needs a real provider + M2 node registration and is not exercised by the stub.
+- Notable gap found while testing: server lacks short-job-ID resolution; use the
+  full `<jobnum>.<server>` form everywhere (see 2.4).
+- Next (M2/M2b/M3): real Azure CRP, cloud-init `pbs_mom` bootstrap, dynamic node
+  add/remove + IP-range ACL auto-registration, event-driven scale-in reclaim.
+
+
 - **M2** — Azure CRP driver + cloud-init bootstrap (install `pbs_mom`, point at
   server, register) + dynamic node add via `qmgr create node`/RPC; node named
   by VM ID as the stable handle (§12.3).
