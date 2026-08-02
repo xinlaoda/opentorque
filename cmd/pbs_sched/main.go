@@ -19,6 +19,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/xinlaoda/opentorque/internal/cec"
+	"github.com/xinlaoda/opentorque/internal/crp"
 	"github.com/xinlaoda/opentorque/internal/sched/client"
 	"github.com/xinlaoda/opentorque/internal/sched/config"
 	"github.com/xinlaoda/opentorque/internal/sched/scheduler"
@@ -55,6 +57,15 @@ func main() {
 	log.Printf("[SCHED] Load balancing: %v", cfg.LoadBalancing)
 
 	sched := scheduler.New(cfg)
+
+	// --- Cloud Elastic Controller (CEC) ---
+	// M1: logging stub provider only. The CEC listens for CapacityEvents sent
+	// by scheduling cycles and (in M2+)  drives a real cloud provider to scale
+	// out node pools. When no cloud queues exist the CEC is inert.
+	cecStop := make(chan struct{})
+	cecCtrl := cec.New(crp.NewStubProvider("azure"))
+	go cecCtrl.Run(cecStop)
+	log.Printf("[SCHED] Cloud Elastic Controller armed (provider=azure, M1 stub)")
 
 	// Determine cycle interval
 	interval := time.Duration(cfg.SchedulerInterval) * time.Second
@@ -108,6 +119,7 @@ func main() {
 		select {
 		case sig := <-sigCh:
 			log.Printf("[SCHED] Received signal %v, shutting down", sig)
+			close(cecStop)
 			if listener != nil {
 				listener.Close()
 			}
@@ -115,7 +127,7 @@ func main() {
 		case <-ticker.C:
 			// Full periodic sweep - the guaranteed safety-net floor. Not
 			// queue-depth limited; cleans up anything limited cycles left.
-			runOneCycle(sched, cfg, false)
+			runOneCycle(sched, cfg, false, cecCtrl)
 			lastRun = time.Now()
 		case <-eventCh:
 			if !cfg.EventDriven {
@@ -141,7 +153,7 @@ func main() {
 					}
 				}
 			}
-			runOneCycle(sched, cfg, true)
+			runOneCycle(sched, cfg, true, cecCtrl)
 			lastRun = time.Now()
 		}
 	}
@@ -177,7 +189,7 @@ func acceptTriggers(listener net.Listener, eventCh chan<- struct{}) {
 // When limited is true it runs a bounded (event-triggered) cycle that respects
 // default_queue_depth / sched_max_job_start / max_sched_time instead of a full
 // sweep.
-func runOneCycle(sched *scheduler.Scheduler, cfg *config.Config, limited bool) {
+func runOneCycle(sched *scheduler.Scheduler, cfg *config.Config, limited bool, ctrl *cec.Controller) {
 	log.Printf("[SCHED] Starting %s cycle (server=%s)", map[bool]string{true: "limited (event)", false: "full (polling)"}[limited], cfg.Server)
 	conn, err := client.Connect(cfg.Server)
 	if err != nil {
@@ -187,15 +199,46 @@ func runOneCycle(sched *scheduler.Scheduler, cfg *config.Config, limited bool) {
 	defer conn.Close()
 	log.Printf("[SCHED] Connected, running scheduling cycle")
 
-	var dispatched int
+	var res *scheduler.CycleResult
 	if limited {
-		dispatched, err = sched.RunCycleLimited(conn)
+		res, err = sched.RunCycleLimited(conn)
 	} else {
-		dispatched, err = sched.RunCycle(conn)
+		res, err = sched.RunCycle(conn)
 	}
 	if err != nil {
 		log.Printf("[SCHED] Cycle error: %v", err)
 		return
 	}
-	log.Printf("[SCHED] Cycle finished: dispatched %d job(s)", dispatched)
+	log.Printf("[SCHED] Cycle finished: dispatched %d job(s)", res.Dispatched)
+
+	// Forward any cloud capacity events to the CEC.
+	for _, ce := range res.CapacityEvents {
+		ev := cec.Event{
+			Kind:     cec.EventCapacity,
+			Queue:    ce.Queue,
+			Provider: ce.Provider,
+			SKU:      ce.SKU,
+			MinNodes: ce.MinNodes,
+			MaxNodes: ce.MaxNodes,
+			IdleTime: time.Duration(ce.IdleTime) * time.Second,
+			Reclaim:  ce.Reclaim,
+			SubnetID: ce.SubnetID,
+			ImageID:  ce.ImageID,
+			DiskSize: ce.DiskSize,
+			DiskType: ce.DiskType,
+			SSHKey:   ce.SSHKey,
+			Location: ce.Location,
+			RGName:   ce.RGName,
+			Shortfall: cec.Shortfall{
+				Cores:   ce.Cores,
+				Nodes:   ce.Nodes,
+				Blocked: ce.Blocked,
+			},
+		}
+		for _, jid := range ce.Jobs {
+			ev.Jobs = append(ev.Jobs, cec.JobDemand{ID: jid})
+		}
+		log.Printf("[SCHED] Forwarding capacity event to CEC: queue=%s cores=%d nodes=%d blocked=%d", ev.Queue, ev.Shortfall.Cores, ev.Shortfall.Nodes, ev.Shortfall.Blocked)
+		ctrl.Events <- ev
+	}
 }

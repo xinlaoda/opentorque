@@ -58,6 +58,59 @@ type QueueInfo struct {
 	Running    int
 	Queued     int
 	Jobs       []*JobInfo
+
+	// Cloud elasticity (cloud-backed queues). When CloudBacked is true the
+	// queue's jobs may be scaled out onto dynamically provisioned VMs.
+	CloudBacked    bool
+	CloudProvider  string
+	CloudSKU       string
+	CloudMinNodes  int
+	CloudMaxNodes  int
+	CloudIdleTime  int    // seconds a free node waits before scale-in
+	CloudReclaim   string
+	CloudSubnetID  string
+	CloudImageID   string
+	CloudDiskSize  int
+	CloudDiskType  string
+	CloudSSHKey    string
+	CloudLocation  string
+	CloudRGName    string
+}
+
+// CapacityEvent is an event emitted by a scheduling cycle when a cloud-backed
+// queue has more queued demand than the current static pool can satisfy. The
+// scheduler accumulates demand across multiple queued jobs (lookahead) so the
+// Cloud Elastic Controller (CEC) can provision the right number of VMs in one
+// pass instead of one per cycle.
+type CapacityEvent struct {
+	Queue    string
+	Provider string
+	SKU      string
+	// Jobs is the list of queued job IDs that contributed to this demand.
+	Jobs []string
+	// Shortfall summarizes how much capacity is missing.
+	Cores    int
+	Nodes    int
+	Blocked  int
+	MinNodes int
+	MaxNodes int
+	IdleTime int
+	Reclaim  string
+	// Full cloud definition (passed through to the CEC/CRP).
+	SubnetID string
+	ImageID  string
+	DiskSize int
+	DiskType string
+	SSHKey   string
+	Location string
+	RGName   string
+}
+
+// CycleResult carries the outcome of a scheduling cycle: how many jobs were
+// dispatched and any capacity events to forward to the CEC.
+type CycleResult struct {
+	Dispatched     int
+	CapacityEvents []CapacityEvent
 }
 
 // ServerInfo holds the complete server state snapshot for one scheduling cycle.
@@ -88,7 +141,8 @@ func New(cfg *config.Config) *Scheduler {
 // 2. Build scheduling data structures
 // 3. Apply sorting and algorithm
 // 4. Dispatch jobs to nodes
-func (s *Scheduler) RunCycle(conn *client.Conn) (int, error) {
+// The returned CycleResult includes any cloud capacity events.
+func (s *Scheduler) RunCycle(conn *client.Conn) (*CycleResult, error) {
 	return s.runCycle(conn, false)
 }
 
@@ -97,17 +151,26 @@ func (s *Scheduler) RunCycle(conn *client.Conn) (int, error) {
 // at most SchedMaxJobStart jobs, and yields after MaxSchedTime seconds. This
 // keeps a flurry of job-submit events from monopolizing the scheduler; the
 // periodic full cycle cleans up whatever a limited cycle leaves behind.
-func (s *Scheduler) RunCycleLimited(conn *client.Conn) (int, error) {
+func (s *Scheduler) RunCycleLimited(conn *client.Conn) (*CycleResult, error) {
 	return s.runCycle(conn, true)
 }
 
 // runCycle is the shared scheduling engine. limited=true applies the queue
 // depth / max-start / max-time caps described on RunCycleLimited.
-func (s *Scheduler) runCycle(conn *client.Conn, limited bool) (int, error) {
+//
+// It returns a CycleResult carrying both the number of dispatched jobs and any
+// cloud capacity events computed during the cycle. A capacity event is emitted
+// for a cloud-backed queue whenever the cycle encounters a job that cannot be
+// placed on any current node AND that queue may scale out (cloud_backed). The
+// demand is accumulated across subsequent jobs (lookahead), so the CEC can
+// provision multiple VMs in one pass.
+func (s *Scheduler) runCycle(conn *client.Conn, limited bool) (*CycleResult, error) {
+	res := &CycleResult{}
+
 	// Query current state from server
 	sinfo, err := s.queryServer(conn)
 	if err != nil {
-		return 0, fmt.Errorf("query server: %w", err)
+		return res, fmt.Errorf("query server: %w", err)
 	}
 
 	// Initialize cycle: sort jobs, detect starvation, decay fair-share
@@ -123,6 +186,13 @@ func (s *Scheduler) runCycle(conn *client.Conn, limited bool) (int, error) {
 		maxStarts = s.cfg.SchedMaxJobStart
 	}
 	cycleStart := time.Now()
+
+	// pendingCap tracks lookahead demand for cloud-backed jobs that could not
+	// be placed this cycle. Keyed by queue name. It is filled as the iterator
+	// walks jobs: when a cloud-backed queue's job blocks, we record it and keep
+	// going (instead of breaking in strict FIFO) so the CEC can provision the
+	// right number of VMs up front.
+	pendingCap := make(map[string]*CapacityEvent)
 
 	// Main scheduling loop: get next job, check resources, dispatch
 	jobIter := s.newJobIterator(sinfo)
@@ -144,7 +214,40 @@ func (s *Scheduler) runCycle(conn *client.Conn, limited bool) (int, error) {
 		node := s.findNodeForJob(sinfo, jinfo)
 		if node == nil {
 			jinfo.CanNotRun = true
-			// In strict FIFO mode, stop scheduling after first blocked job
+			// Lookahead for cloud-backed queues: accumulate demand instead of
+			// breaking in strict FIFO mode, so the CEC can scale out once.
+			if q := queueForJob(sinfo, jinfo.Queue); q != nil && q.CloudBacked {
+				ev, ok := pendingCap[q.Name]
+				if !ok {
+					ev = &CapacityEvent{
+						Queue:     q.Name,
+						Provider:  q.CloudProvider,
+						SKU:       q.CloudSKU,
+						MinNodes:  q.CloudMinNodes,
+						MaxNodes:  q.CloudMaxNodes,
+						IdleTime:  q.CloudIdleTime,
+						Reclaim:   q.CloudReclaim,
+						SubnetID:  q.CloudSubnetID,
+						ImageID:   q.CloudImageID,
+						DiskSize:  q.CloudDiskSize,
+						DiskType:  q.CloudDiskType,
+						SSHKey:    q.CloudSSHKey,
+						Location:  q.CloudLocation,
+						RGName:    q.CloudRGName,
+					}
+					pendingCap[q.Name] = ev
+				}
+				cpu := jinfo.CPUReq
+				if cpu == 0 {
+					cpu = 1
+				}
+				ev.Cores += cpu
+				ev.Blocked++
+				ev.Jobs = append(ev.Jobs, jinfo.ID)
+				log.Printf("[SCHED] Cloud queue %s: job %s needs %d cores, no node available (blocked=%d)", q.Name, jinfo.ID, cpu, ev.Blocked)
+				continue // do NOT break; keep looking across remaining jobs
+			}
+			// Non-cloud strict FIFO: stop after first blocked job.
 			if s.cfg.StrictFIFO {
 				log.Printf("[SCHED] Strict FIFO: job %s blocked, stopping cycle", jinfo.ID)
 				break
@@ -178,7 +281,42 @@ func (s *Scheduler) runCycle(conn *client.Conn, limited bool) (int, error) {
 		}
 	}
 
-	return dispatched, nil
+	// Convert pendingCap map into a slice, computing the node shortfall from
+	// the accumulated core demand (each VM is assumed to provide the SKU's
+	// core count; the CEC refines this in M2+).
+	for _, ev := range pendingCap {
+		coresPerNode := 1
+		if ev.SKU != "" {
+			// Heuristic: assume at least 2 cores/SKU unless set. The CEC will
+			// query the cloud for the real core count; this is a floor.
+			coresPerNode = 2
+		}
+		if ev.Cores > 0 {
+			ev.Nodes = (ev.Cores + coresPerNode - 1) / coresPerNode // ceil
+		}
+		// Cap by MaxNodes (relative to current static pool size is done in CEC).
+		if ev.MaxNodes > 0 && ev.Nodes >= ev.MaxNodes {
+			ev.Nodes = ev.MaxNodes
+		}
+		if ev.Nodes < 1 {
+			ev.Nodes = 1
+		}
+		log.Printf("[SCHED] Cloud queue %s: capacity event cores=%d nodes=%d blocked=%d", ev.Queue, ev.Cores, ev.Nodes, ev.Blocked)
+		res.CapacityEvents = append(res.CapacityEvents, *ev)
+	}
+
+	res.Dispatched = dispatched
+	return res, nil
+}
+
+// queueForJob returns the QueueInfo matching a job's queue name.
+func queueForJob(sinfo *ServerInfo, name string) *QueueInfo {
+	for _, q := range sinfo.Queues {
+		if q.Name == name {
+			return q
+		}
+	}
+	return nil
 }
 
 // queryServer fetches all jobs, queues, and nodes from the server.
@@ -569,6 +707,35 @@ func parseQueueInfo(obj client.StatusObject) *QueueInfo {
 			q.Running, _ = strconv.Atoi(a.Value)
 		case "state_count_queued":
 			q.Queued, _ = strconv.Atoi(a.Value)
+		case "cloud_provider":
+			q.CloudProvider = a.Value
+			if a.Value != "" {
+				q.CloudBacked = true
+			}
+		case "cloud_vm_sku":
+			q.CloudSKU = a.Value
+		case "cloud_min_nodes":
+			q.CloudMinNodes, _ = strconv.Atoi(a.Value)
+		case "cloud_max_nodes":
+			q.CloudMaxNodes, _ = strconv.Atoi(a.Value)
+		case "cloud_idle_time":
+			q.CloudIdleTime, _ = strconv.Atoi(a.Value)
+		case "cloud_reclaim":
+			q.CloudReclaim = a.Value
+		case "cloud_subnet_id":
+			q.CloudSubnetID = a.Value
+		case "cloud_image_id":
+			q.CloudImageID = a.Value
+		case "cloud_disk_size":
+			q.CloudDiskSize, _ = strconv.Atoi(a.Value)
+		case "cloud_disk_type":
+			q.CloudDiskType = a.Value
+		case "cloud_ssh_key":
+			q.CloudSSHKey = a.Value
+		case "cloud_location":
+			q.CloudLocation = a.Value
+		case "cloud_rg_name":
+			q.CloudRGName = a.Value
 		}
 	}
 	return q

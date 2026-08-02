@@ -1027,7 +1027,7 @@ func (s *Server) handleRunJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestHead
 	}
 
 	j.Mu.RLock()
-	if j.State != job.StateQueued {
+	if j.State != job.StateQueued && j.State != job.StateProvisioning {
 		j.Mu.RUnlock()
 		dis.SendErrorReply(conn, dis.PbseBadReq, 0)
 		return true
@@ -2066,6 +2066,12 @@ func (s *Server) formatJobStatus(j *job.Job) dis.StatusObject {
 
 	// Execution info
 	add("exec_host", j.ExecHost)
+	if j.ProvisionVM != "" {
+		add("provision_vm", j.ProvisionVM)
+	}
+	if j.ProvisionNode != "" {
+		add("provision_node", j.ProvisionNode)
+	}
 	if j.ExecPort > 0 {
 		add("exec_port", strconv.Itoa(j.ExecPort))
 	}
@@ -3339,6 +3345,12 @@ func (s *Server) buildMOMJobAttrs(j *job.Job) []dis.SvrAttrl {
 	}
 	add("Error_Path", j.StderrPath)
 	add("exec_host", j.ExecHost)
+	if j.ProvisionVM != "" {
+		add("provision_vm", j.ProvisionVM)
+	}
+	if j.ProvisionNode != "" {
+		add("provision_node", j.ProvisionNode)
+	}
 	add("exec_port", strconv.Itoa(j.ExecPort))
 	add("Join_Path", j.JoinPath)
 	if j.JoinPath == "" {
@@ -4103,6 +4115,10 @@ func (s *Server) recoverJobs() {
 					j.StderrPath = val
 				case "exit_status":
 					fmt.Sscanf(val, "%d", &j.ExitStatus)
+				case "provision_vm":
+					j.ProvisionVM = val
+				case "provision_node":
+					j.ProvisionNode = val
 				}
 			}
 		}
@@ -4112,7 +4128,10 @@ func (s *Server) recoverJobs() {
 			continue
 		}
 
-		// Re-queue running jobs that weren't actually running (server restart)
+		// Re-queue running jobs that weren't actually running (server restart).
+		// PROVISIONING jobs remain PROVISIONING: the CEC will reconcile on the
+		// next capacity event (either the VM eventually comes up, or the job
+		// is timed out and returned to Q).
 		if j.State == job.StateRunning {
 			j.SetState(job.StateQueued, job.SubstateQueued)
 			j.ExecHost = ""
@@ -4404,6 +4423,12 @@ func (s *Server) saveJob(j *job.Job) {
 	sb.WriteString(fmt.Sprintf("stdout=%s\n", j.StdoutPath))
 	sb.WriteString(fmt.Sprintf("stderr=%s\n", j.StderrPath))
 	sb.WriteString(fmt.Sprintf("exit_status=%d\n", j.ExitStatus))
+	if j.ProvisionVM != "" {
+		sb.WriteString(fmt.Sprintf("provision_vm=%s\n", j.ProvisionVM))
+	}
+	if j.ProvisionNode != "" {
+		sb.WriteString(fmt.Sprintf("provision_node=%s\n", j.ProvisionNode))
+	}
 
 	path := filepath.Join(s.cfg.JobsDir, j.ID+".JB")
 	tmpFile := path + ".new"

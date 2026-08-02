@@ -16,6 +16,7 @@ const (
 	StateRunning  = 4 // Currently executing on a node
 	StateExiting  = 5 // Exiting, cleanup in progress
 	StateComplete = 6 // Completed (kept for history)
+	StateProvisioning = 7 // Cloud-provisioning (VM booting, between Q and R)
 )
 
 // Job substates for more granular tracking
@@ -40,6 +41,7 @@ var StateNames = map[int]string{
 	StateRunning:  "R",
 	StateExiting:  "E",
 	StateComplete: "C",
+	StateProvisioning: "D", // D = dispatching/provisioning
 }
 
 // Job represents a batch job in the server.
@@ -124,6 +126,12 @@ type Job struct {
 	TaskCount  int
 	NeedNodes  string // neednodes spec
 
+	// Cloud provisioning binding (cloud elasticity)
+	// ProvisionVM holds the stable cloud VM id the job is bound to while its
+	// VM boots; ProvisionNode is the provisional node name. Persisted in .JB.
+	ProvisionVM   string
+	ProvisionNode string
+
 	// Flags
 	Modified  bool
 	FromRoute bool // Job came via routing
@@ -163,6 +171,11 @@ func (j *Job) IsRunning() bool {
 // IsQueued returns true if the job is in Queued state.
 func (j *Job) IsQueued() bool {
 	return j.State == StateQueued
+}
+
+// IsProvisioning returns true if the job is in the cloud-provisioning state.
+func (j *Job) IsProvisioning() bool {
+	return j.State == StateProvisioning
 }
 
 // IsComplete returns true if the job is in Complete state.
