@@ -394,13 +394,47 @@ Validated live against the M1 stub CRP (`azure`) running inside `pbs_sched`:
   add/remove + IP-range ACL auto-registration, event-driven scale-in reclaim.
 
 
+### 4.4b M2/M2b implementation + live test results (RG `xxin-opentorque-test`, westus3)
+M2 (real Azure CRP + cloud-init `pbs_mom` bootstrap) and M2b (dynamic node
+auto-registration with IP-range ACL) are now **implemented and verified
+end-to-end against live Azure** (subscription `a04b47d2-...`). Key results:
+- **Real CRP driver** (`internal/cec` + IMDS MSI auth) creates VMs via ARM with
+  no public IP; vnet/subnet `10.20.0.0/16`; cloud-init pulls `pbs_mom` +
+  `auth_key` from the server's HTTP bootstrap endpoint (`http.server 8080`).
+- **Scale-out:** `[AzureCRP] Ensure created VM ot-node-WhcG4fS0 sku=Standard_D2s_v3`.
+- **Auto-register (M2b):** server attrs `allow_dynamic_nodes=True` +
+  `node_allowed_ip_ranges=10.20.0.0/16`; on first IS contact from an allowed
+  source IP the MOM is registered: `[NODE] Added node ot-node-WhcG4fS0 (np=2,
+  id=2)` + `[SERVER] Auto-registered dynamic node ot-node-WhcG4fS0 (ip=10.20.0.6,
+  np=2)`; the bound VM's first contact drives `PROVISIONING -> R`.
+- **Job executes on the dynamic node** (proves full pipeline): jobs 30 & 31
+  dispatched to `ot-node-WhcG4fS0` and ran exit=0 (`EXEC-ON ot-node-WhcG4fS0` /
+  `DONE ot-node-WhcG4fS0`); output files delivered to `/tmp/fo1.txt`,
+  `/tmp/fo2.txt` on the node. Scheduler log: `[SCHED] Dispatched
+  30.xxin-opentorque-srv to ot-node-WhcG4fS0`.
+- **Bug found + fixed (commit `49a481d`):** dynamic-node mom failed every job
+  with `fork/exec /bin/sh: no such file or directory` even though `/bin/sh`
+  exists. Root cause: `getWorkDir(j)` returned `PBS_O_WORKDIR` = the srv-only
+  submit dir (`/var/lib/waagent/run-command/download/N`) that does not exist on
+  the node; Go reports a misleading no-such-file error when a bad `cmd.Dir` is
+  combined with `Setsid: true`. Fix: validate each candidate (`PBS_O_WORKDIR`,
+  `HOME`, `os.Getenv`) with `os.Stat` and fall back to `/`.
+- **M3 (scale-in) remains the open gap:** scheduler only emits `EventCapacity`;
+  `EventNodeFree`/`EventNodeIdle`/`EventNodeDown` are defined but never emitted,
+  and `handleNodeIdle` only logs/stubs (does not call the CRP to
+  deallocate/destroy). So `cloud_idle_time`/`cloud_reclaim` do not yet reclaim
+  VMs. See M3 bullet below.
+
+
 - **M2** — Azure CRP driver + cloud-init bootstrap (install `pbs_mom`, point at
   server, register) + dynamic node add via `qmgr create node`/RPC; node named
-  by VM ID as the stable handle (§12.3).
+  by VM ID as the stable handle (§12.3). **[DONE -- implemented & integration-tested]**
 - **M2b** — dynamic node registration with IP-range ACL (§12.4): new server
   attrs `allow_dynamic_nodes` (default false) + `node_allowed_ip_ranges` (CIDR
   list); auto-register a MOM on first IS contact only if its source IP is in an
   allowed range; first contact of a bound VM drives `PROVISIONING -> R`.
+  **[DONE -- implemented & integration-tested]**
+
 - **M3** — event-driven scale-in: observe `NodeFree` → idle window →
   drain → deregister → `deallocate`/`hibernate`; fast `resume` for hibernate;
   provisioning timeout + `qdel`-during-provisioning cleanup (§12.2).
