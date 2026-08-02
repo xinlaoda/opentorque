@@ -1555,8 +1555,17 @@ func (s *Server) handleISMessage(conn net.Conn, r *dis.Reader, remote string) {
 		}
 	}
 
-	// Find or auto-create the node
+	// Extract remote IP for dynamic node registration and IP tracking
+	remoteHost, _, _ := net.SplitHostPort(remote)
+	remoteIP := net.ParseIP(remoteHost)
+
+	// Find or auto-register the node
 	n := s.nodeMgr.GetNode(hostname)
+	if n == nil {
+		if s.tryAutoRegisterNode(hostname, remoteIP) {
+			n = s.nodeMgr.GetNode(hostname)
+		}
+	}
 	if n == nil {
 		log.Printf("[SERVER] IS message from unknown node %s, ignoring", hostname)
 		return
@@ -1566,6 +1575,10 @@ func (s *Server) handleISMessage(conn net.Conn, r *dis.Reader, remote string) {
 	n.Mu.Lock()
 	n.MomPort = msg.MomPort
 	n.RmPort = msg.RmPort
+	// Track the last known IP so the server can reach the MOM without DNS
+	if remoteIP != nil {
+		n.IP = remoteIP.String()
+	}
 	n.UpdateFromStatus(msg.Items)
 	n.Mu.Unlock()
 
@@ -1577,6 +1590,57 @@ func (s *Server) handleISMessage(conn net.Conn, r *dis.Reader, remote string) {
 	w.WriteInt(3)
 	w.WriteInt(0) // IS_NULL acknowledgement
 	w.Flush()
+}
+
+// tryAutoRegisterNode auto-registers a previously-unknown MOM if:
+//  1. server config allows dynamic nodes (allow_dynamic_nodes=True), and
+//  2. the remote IP falls within one of the allowed CIDR ranges
+//     (node_allowed_ip_ranges, comma-separated), and
+//  3. the numeric processor count is overridable via auto_node_np/np_default,
+//     otherwise the node is registered with np=1.
+func (s *Server) tryAutoRegisterNode(hostname string, remoteIP net.IP) bool {
+	if !s.cfg.AllowDynamicNodes {
+		log.Printf("[SERVER] dynamic node registration disabled; ignoring %s", hostname)
+		return false
+	}
+	if remoteIP == nil {
+		log.Printf("[SERVER] cannot determine remote IP for node %s, rejecting", hostname)
+		return false
+	}
+	if !s.ipInAllowedRanges(remoteIP) {
+		log.Printf("[SERVER] node %s IP %s not in allowed ranges, rejecting registration", hostname, remoteIP)
+		return false
+	}
+	// Determine np: if auto_node_np is on use np_default (or 1); otherwise 1.
+	np := 1
+	if s.cfg.AutoNodeNP && s.cfg.NPDefault > 0 {
+		np = s.cfg.NPDefault
+	}
+	s.nodeMgr.AddNode(hostname, np)
+	s.saveNodes()
+	log.Printf("[SERVER] Auto-registered dynamic node %s (ip=%s, np=%d)", hostname, remoteIP, np)
+	return true
+}
+
+// ipInAllowedRanges reports whether ip falls within any comma-separated CIDR
+// in s.cfg.NodeAllowedIPRanges (e.g. "10.20.0.0/16,172.16.0.0/12").
+func (s *Server) ipInAllowedRanges(ip net.IP) bool {
+	ranges := strings.Split(s.cfg.NodeAllowedIPRanges, ",")
+	for _, r := range ranges {
+		r = strings.TrimSpace(r)
+		if r == "" {
+			continue
+		}
+		_, cidr, err := net.ParseCIDR(r)
+		if err != nil {
+			log.Printf("[SERVER] invalid CIDR in node_allowed_ip_ranges: %q", r)
+			continue
+		}
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Manager (qmgr) Sub-Handlers ---
@@ -1810,6 +1874,10 @@ func (s *Server) mgrSetServer(attrs []dis.SvrAttrl) error {
 			s.cfg.AutoNodeNP = parseBool(a.Value)
 		case "np_default":
 			fmt.Sscanf(a.Value, "%d", &s.cfg.NPDefault)
+		case "allow_dynamic_nodes":
+			s.cfg.AllowDynamicNodes = parseBool(a.Value)
+		case "node_allowed_ip_ranges":
+			s.cfg.NodeAllowedIPRanges = a.Value
 		case "job_nanny":
 			s.cfg.JobNanny = parseBool(a.Value)
 		case "owner_purge":
@@ -2407,6 +2475,10 @@ func (s *Server) formatServerStatus() dis.StatusObject {
 		addBool("auto_node_np", true)
 	}
 	addIntNZ("np_default", s.cfg.NPDefault)
+	if s.cfg.AllowDynamicNodes {
+		addBool("allow_dynamic_nodes", true)
+	}
+	addStr("node_allowed_ip_ranges", s.cfg.NodeAllowedIPRanges)
 	if s.cfg.JobNanny {
 		addBool("job_nanny", true)
 	}
@@ -3175,7 +3247,14 @@ func (s *Server) scheduleJob(j *job.Job) bool {
 // This follows the same protocol sequence that the C pbs_server uses.
 func (s *Server) dispatchJobToMOM(j *job.Job, n *node.Node) {
 	n.Mu.RLock()
-	momAddr := fmt.Sprintf("%s:%d", n.Name, n.MomPort)
+	// Prefer the node's known private IP (dynamic cloud nodes may not be
+	// resolvable via DNS user a short random computer name); fall back to
+	// the node name, which resolves via static DNS for pre-provisioned nodes.
+	momHost := n.Name
+	if n.IP != "" {
+		momHost = n.IP
+	}
+	momAddr := fmt.Sprintf("%s:%d", momHost, n.MomPort)
 	n.Mu.RUnlock()
 
 	// Connect to MOM from a privileged port (required for authentication)
@@ -3667,7 +3746,8 @@ func (s *Server) recoverServerDBXML(content string) {
 		"default_node": "", "node_pack": "", "query_other_jobs": "",
 		"mom_job_sync": "", "down_on_error": "", "disable_server_id_check": "",
 		"allow_node_submit": "", "allow_proxy_user": "", "auto_node_np": "",
-		"np_default": "", "job_nanny": "", "owner_purge": "",
+		"np_default": "", "allow_dynamic_nodes": "", "node_allowed_ip_ranges": "",
+		"job_nanny": "", "owner_purge": "",
 		"copy_on_rerun": "", "job_exclusive_on_use": "",
 		"disable_automatic_requeue": "", "automatic_requeue_exit_code": "",
 		"dont_write_nodes_file": "",
@@ -3869,6 +3949,10 @@ func (s *Server) applyServerDBAttr(key, val string) {
 		s.cfg.AutoNodeNP = parseBool(val)
 	case "np_default":
 		fmt.Sscanf(val, "%d", &s.cfg.NPDefault)
+	case "allow_dynamic_nodes":
+		s.cfg.AllowDynamicNodes = parseBool(val)
+	case "node_allowed_ip_ranges":
+		s.cfg.NodeAllowedIPRanges = val
 	case "job_nanny":
 		s.cfg.JobNanny = parseBool(val)
 	case "owner_purge":
@@ -4270,6 +4354,8 @@ func (s *Server) saveServerDB() {
 	writeBool("allow_proxy_user", s.cfg.AllowProxyUser)
 	writeBool("auto_node_np", s.cfg.AutoNodeNP)
 	writeInt("np_default", s.cfg.NPDefault)
+	writeBool("allow_dynamic_nodes", s.cfg.AllowDynamicNodes)
+	writeStr("node_allowed_ip_ranges", s.cfg.NodeAllowedIPRanges)
 	writeBool("job_nanny", s.cfg.JobNanny)
 	writeBool("owner_purge", s.cfg.OwnerPurge)
 	writeBool("copy_on_rerun", s.cfg.CopyOnRerun)

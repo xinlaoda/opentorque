@@ -36,6 +36,7 @@ type Node struct {
 
 	Name     string // Hostname
 	ID       int    // Node index
+	IP       string // Last known private IP (from IS update / registration)
 	State    int    // State flags (can be combined)
 	NumProcs int    // Number of processors (np)
 	MomPort  int    // MOM service port (default 15002)

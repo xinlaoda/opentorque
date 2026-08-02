@@ -48,6 +48,7 @@ type Event struct {
 	SSHKey   string
 	Location string
 	RGName   string
+	ServerAddr string // pbs_server endpoint for cloud-init (ip:port)
 }
 
 // JobDemand is the resource demand of a single queued (cloud-bound) job.
@@ -81,6 +82,7 @@ type Pool struct {
 	SSHKey   string
 	Location string
 	RGName   string
+	ServerAddr string
 
 	Running int               // VMs currently up/being tracked
 	Inflight int              // VMs being provisioned (Ensured, not yet up)
@@ -132,6 +134,7 @@ func (c *Controller) ensurePool(ev Event) *Pool {
 			SSHKey:        ev.SSHKey,
 			Location:      ev.Location,
 			RGName:        ev.RGName,
+			ServerAddr:    ev.ServerAddr,
 			Provisioning:  make(map[string]string),
 			IdleSince:     make(map[string]time.Time),
 		}
@@ -234,6 +237,7 @@ func (c *Controller) handleCapacity(ev Event) {
 		ResourceGroup: p.RGName,
 		MinNodes:      p.MinNodes,
 		MaxNodes:      p.MaxNodes,
+		ServerAddr:    p.ServerAddr,
 	})
 	if err != nil {
 		log.Printf("[CEC] queue=%s provider Ensure error: %v", ev.Queue, err)
@@ -286,20 +290,35 @@ func (c *Controller) handleNodeDown(ev Event) {
 
 // RegisterNodeUp is called by the server/watcher when a newly provisioned VM's
 // MOM has registered and the node is free. It decrements inflight and later
-// drives the PROVISIONING -> R transition.
+// drives the PROVISIONING -> R transition. It is idempotent: a node that is
+// no longer tracked in Provisioning is ignored so repeated calls are safe.
 func (c *Controller) RegisterNodeUp(queue, vmID string) {
+	c.RegisterNodesUp(queue, []string{vmID})
+}
+
+// RegisterNodesUp records that the given nodes (which correspond to VMs this
+// pool is still provisioning) have now booted and registered with the server.
+// Any node not currently in the pool's Provisioning map is ignored, so this is
+// safe to call every cycle with the full list of free nodes. It bumps Running
+// and decrements Inflight for each consumed node.
+func (c *Controller) RegisterNodesUp(queue string, nodes []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, ok := c.pools[queue]
 	if !ok {
 		return
 	}
-	if p.Inflight > 0 {
-		p.Inflight--
+	for _, n := range nodes {
+		if _, isProv := p.Provisioning[n]; !isProv {
+			continue
+		}
+		delete(p.Provisioning, n)
+		if p.Inflight > 0 {
+			p.Inflight--
+		}
+		p.Running++
+		log.Printf("[CEC] queue=%s node up (vm=%s), running=%d inflight=%d", queue, n, p.Running, p.Inflight)
 	}
-	p.Running++
-	delete(p.Provisioning, vmID)
-	log.Printf("[CEC] queue=%s node up (vm=%s), running=%d inflight=%d", queue, vmID, p.Running, p.Inflight)
 }
 
 func jobIDOr(s, def string) string {

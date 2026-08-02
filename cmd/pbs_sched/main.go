@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -59,13 +60,26 @@ func main() {
 	sched := scheduler.New(cfg)
 
 	// --- Cloud Elastic Controller (CEC) ---
-	// M1: logging stub provider only. The CEC listens for CapacityEvents sent
-	// by scheduling cycles and (in M2+)  drives a real cloud provider to scale
-	// out node pools. When no cloud queues exist the CEC is inert.
+	// M2: Azure real-cloud provider via MSI + REST. The CEC listens for
+	// CapacityEvents and drives the AzureCRP to scale out worker VMs.
+	// When no cloud queues exist the CEC is inert.
+	//
+	// The Azure subscription ID is required. It is read from the environment
+	// (AZURE_SUBSCRIPTION_ID) or defaults to the test subscription.
+	azureSub := os.Getenv("AZURE_SUBSCRIPTION_ID")
+	if azureSub == "" {
+		azureSub = "a04b47d2-8e6c-4b00-9a04-221a694231ee"
+		log.Printf("[SCHED] AZURE_SUBSCRIPTION_ID not set; defaulting to %s", azureSub)
+	}
 	cecStop := make(chan struct{})
-	cecCtrl := cec.New(crp.NewStubProvider("azure"))
+	cecCtrl := cec.New(crp.NewAzureCRP(azureSub))
 	go cecCtrl.Run(cecStop)
-	log.Printf("[SCHED] Cloud Elastic Controller armed (provider=azure, M1 stub)")
+	log.Printf("[SCHED] Cloud Elastic Controller armed (provider=azure/M2, subscription=%s)", azureSub)
+
+	// cloudTracker remembers which queues are cloud-backed so the scheduler can
+	// notify the CEC (via RegisterNodesUp) when a provisioned VM's node boots
+	// and registers, even on cycles where no capacity shortfall is emitted.
+	ct := newCloudTracker(cecCtrl)
 
 	// Determine cycle interval
 	interval := time.Duration(cfg.SchedulerInterval) * time.Second
@@ -127,7 +141,7 @@ func main() {
 		case <-ticker.C:
 			// Full periodic sweep - the guaranteed safety-net floor. Not
 			// queue-depth limited; cleans up anything limited cycles left.
-			runOneCycle(sched, cfg, false, cecCtrl)
+			runOneCycle(sched, cfg, false, ct)
 			lastRun = time.Now()
 		case <-eventCh:
 			if !cfg.EventDriven {
@@ -153,7 +167,7 @@ func main() {
 					}
 				}
 			}
-			runOneCycle(sched, cfg, true, cecCtrl)
+			runOneCycle(sched, cfg, true, ct)
 			lastRun = time.Now()
 		}
 	}
@@ -189,7 +203,7 @@ func acceptTriggers(listener net.Listener, eventCh chan<- struct{}) {
 // When limited is true it runs a bounded (event-triggered) cycle that respects
 // default_queue_depth / sched_max_job_start / max_sched_time instead of a full
 // sweep.
-func runOneCycle(sched *scheduler.Scheduler, cfg *config.Config, limited bool, ctrl *cec.Controller) {
+func runOneCycle(sched *scheduler.Scheduler, cfg *config.Config, limited bool, ct *cloudTracker) {
 	log.Printf("[SCHED] Starting %s cycle (server=%s)", map[bool]string{true: "limited (event)", false: "full (polling)"}[limited], cfg.Server)
 	conn, err := client.Connect(cfg.Server)
 	if err != nil {
@@ -229,6 +243,7 @@ func runOneCycle(sched *scheduler.Scheduler, cfg *config.Config, limited bool, c
 			SSHKey:   ce.SSHKey,
 			Location: ce.Location,
 			RGName:   ce.RGName,
+			ServerAddr: cfg.Server,
 			Shortfall: cec.Shortfall{
 				Cores:   ce.Cores,
 				Nodes:   ce.Nodes,
@@ -238,7 +253,46 @@ func runOneCycle(sched *scheduler.Scheduler, cfg *config.Config, limited bool, c
 		for _, jid := range ce.Jobs {
 			ev.Jobs = append(ev.Jobs, cec.JobDemand{ID: jid})
 		}
+		ct.rememberQueue(ce.Queue)
 		log.Printf("[SCHED] Forwarding capacity event to CEC: queue=%s cores=%d nodes=%d blocked=%d", ev.Queue, ev.Shortfall.Cores, ev.Shortfall.Nodes, ev.Shortfall.Blocked)
-		ctrl.Events <- ev
+		ct.ctrl.Events <- ev
+	}
+
+	// After the cycle, tell the CEC which of the free nodes correspond to
+	// still-provisioning VMs for each known cloud queue. This drives the
+	// PROVISIONING -> R / inflight-decrement transition even on cycles without
+	// a capacity shortfall.
+	for _, q := range ct.queues() {
+		ct.ctrl.RegisterNodesUp(q, res.FreeNodes)
 	}
 }
+
+// cloudTracker remembers the set of cloud-backed queues seen so the scheduler
+// can notify the CEC about registered nodes on every cycle, not only on
+// capacity-shortfall cycles.
+type cloudTracker struct {
+	mu     sync.Mutex
+	ctrl   *cec.Controller
+	known  map[string]struct{}
+}
+
+func newCloudTracker(ctrl *cec.Controller) *cloudTracker {
+	return &cloudTracker{ctrl: ctrl, known: make(map[string]struct{})}
+}
+
+func (t *cloudTracker) rememberQueue(q string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.known[q] = struct{}{}
+}
+
+func (t *cloudTracker) queues() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]string, 0, len(t.known))
+	for q := range t.known {
+		out = append(out, q)
+	}
+	return out
+}
+

@@ -49,6 +49,7 @@ type EnsureRequest struct {
 	ResourceGroup string // queue.cloud_rg_name
 	MinNodes    int    // queue.cloud_min_nodes
 	MaxNodes    int    // queue.cloud_max_nodes
+	ServerAddr  string // pbs_server address (IP:port) used by cloud-init bootstrap
 }
 
 // VMRef uniquely identifies a VM.

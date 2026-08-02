@@ -111,6 +111,7 @@ type CapacityEvent struct {
 type CycleResult struct {
 	Dispatched     int
 	CapacityEvents []CapacityEvent
+	FreeNodes      []string // names of nodes with available capacity after this cycle
 }
 
 // ServerInfo holds the complete server state snapshot for one scheduling cycle.
@@ -306,6 +307,15 @@ func (s *Scheduler) runCycle(conn *client.Conn, limited bool) (*CycleResult, err
 	}
 
 	res.Dispatched = dispatched
+
+	// Record nodes with available capacity so the CEC can tell when a
+	// previously-provisioned VM's node has registered (cloud elasticity).
+	for _, n := range sinfo.Nodes {
+		if n.FreeCPUs > 0 {
+			res.FreeNodes = append(res.FreeNodes, n.Name)
+		}
+	}
+
 	return res, nil
 }
 

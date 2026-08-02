@@ -97,6 +97,9 @@ type Config struct {
 	AllowProxyUser       bool
 	AutoNodeNP           bool
 	NPDefault            int
+	// Dynamic node auto-registration (cloud elastic M2)
+	AllowDynamicNodes    bool   // server auto-registers unknown MOMs that contact it
+	NodeAllowedIPRanges  string // comma-separated CIDRs; only nodes from these ranges auto-register
 	JobNanny             bool
 	OwnerPurge           bool
 	CopyOnRerun          bool
