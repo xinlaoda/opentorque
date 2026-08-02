@@ -351,24 +351,33 @@ VMs on demand. Not implemented; the designs are the authoritative reference:
 
 ### 4.4 Event-driven elastic controller implementation  [GAP] -- scoped
 Concrete work items to build the event-driven cloud elasticity (per
-`docs/cloud-elastic-event-driven-design.md`):
+`docs/cloud-elastic-event-driven-design.md`, esp. the revision in §13):
 - **M0** — add the `cloud_*` queue attributes end-to-end: model fields
   (`internal/queue/queue.go`), `applyQueueAttrs` parsing, `formatQueueStatus`
   display, and persistence (server restart). Enables config only.
 - **M1** — `pbs_sched` emits a JSON `NeedCapacity` event when jobs are left
   unplaceable (`findNodeForJob` returns nil → `CanNotRun`), per cloud-backed
-  queue; a CEC event-loop service with in-flight guard and cooldown; CRP
-  adapter interface stubs (`ensure/describe/reclaim/resume/health`).
+  queue, using **lookahead accumulation** (§12.1) so strict-FIFO size
+  one-or-more VMs for the backlog, not just the head job; add the new
+  `PROVISIONING` job state + job<->VM (`vm_id`) binding record (§12.2/12.3);
+  CEC event-loop with in-flight guard and cooldown; CRP adapter interface stubs
+  (`ensure/describe/reclaim/resume/health`) that return `vmID` before boot.
 - **M2** — Azure CRP driver + cloud-init bootstrap (install `pbs_mom`, point at
-  server, register) + dynamic node add via `qmgr create node`/RPC.
+  server, register) + dynamic node add via `qmgr create node`/RPC; node named
+  by VM ID as the stable handle (§12.3).
+- **M2b** — dynamic node registration with IP-range ACL (§12.4): new server
+  attrs `allow_dynamic_nodes` (default false) + `node_allowed_ip_ranges` (CIDR
+  list); auto-register a MOM on first IS contact only if its source IP is in an
+  allowed range; first contact of a bound VM drives `PROVISIONING -> R`.
 - **M3** — event-driven scale-in: observe `NodeFree` → idle window →
-  drain → deregister → `deallocate`/`hibernate`; fast `resume` for hibernate.
+  drain → deregister → `deallocate`/`hibernate`; fast `resume` for hibernate;
+  provisioning timeout + `qdel`-during-provisioning cleanup (§12.2).
 - **M4** — cooldown tuning, shortfall headroom, `NeedCapacity` merge/coalesce,
   drain timeout policy, surface per-pool free-cores via a status RPC (extends
   the `qstat -B` gap in 2.9).
-- Blockers (from the design's §11): multi-node jobs (1.4) affect shortfall
-  math; jobs larger than one SKU node cannot be placed; expose per-queue free
-  cores snapshot.
+- Blockers (design §11): multi-node jobs (1.4) affect shortfall math; jobs
+  larger than one SKU node cannot be placed; expose per-queue free cores
+  snapshot.
 
 ---
 
