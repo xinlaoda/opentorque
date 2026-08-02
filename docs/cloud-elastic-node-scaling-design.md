@@ -5,6 +5,16 @@ Scope: External cloud resource provider + queue-driven elastic node up/down
 Owner: xin
 Date: 2026-08-01
 
+> **2026-08-02 revision note:** §8 of this document described a fixed-tick
+> (30–60 s) polling policy for computing the desired pool size. That polling
+> approach is **superseded** by the event-driven model in
+> `docs/cloud-elastic-event-driven-design.md`: scale-out/reclaim are now driven
+> by real scheduler/cluster events (`NeedCapacity` from `CanNotRun`, `NodeFree`/
+> `NodeIdle`/`NodeDown`) instead of a periodic timer. The queue-attribute model,
+> CRP architecture, dynamic node add/remove, and reclaim semantics in this
+> document remain valid and are reused; only the *when to scale* logic changes
+> to event-driven.
+
 ---
 
 ## 1. Overview

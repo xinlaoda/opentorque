@@ -314,11 +314,17 @@ No convenience for draining a node before maintenance/scale-in (only manual
 `pbsnodes -o` + wait; no graceful `excl`/drain state).
 
 ### 4.3 Cloud elastic node scaling (queue-driven)  [GAP] -- DESIGNED, NOT implemented
-Queue-defined burst/scale-in of cloud VMs, per the design in
-`docs/cloud-elastic-node-scaling-design.md`. When a queue (or node group)
-carries cloud attributes, an external "Cloud Elastic Controller" (CEC) talks to a
+Queue-defined burst/scale-in of cloud VMs. When a queue (or node group) carries
+cloud attributes, an external "Cloud Elastic Controller" (CEC) talks to a
 per-cloud "Cloud Resource Provider" (CRP) process to provision/deprovision worker
-VMs on demand. Not implemented; the design is the authoritative reference.
+VMs on demand. Not implemented; the designs are the authoritative reference:
+- `docs/cloud-elastic-node-scaling-design.md` — architecture, queue attrs, CRP
+  interface, dynamic node add/remove, reclaim lifecycle.
+- `docs/cloud-elastic-event-driven-design.md` (**preferred**) — **event-driven**
+  scale model: the scheduler emits a `NeedCapacity` event whenever jobs are left
+  unplaceable (`CanNotRun`), and the CEC reacts immediately instead of polling
+  on a fixed tick. Scale-in is driven by `NodeFree`/`NodeIdle`/`NodeDown` events.
+  This supersedes the fixed-tick policy of the older design (see §8 note there).
 - Queue `cloud_*` attributes to implement:
   - `cloud_provider`  -- cloud name (azure/aws/...) used to locate the matching
     external CRP via a provider-name -> endpoint registry.
@@ -342,6 +348,27 @@ VMs on demand. Not implemented; the design is the authoritative reference.
 - Open questions (see design appendix): cost/metering, capacity planning for
   `cloud_max_nodes`, cold-start latency for `deallocate` vs `hibernate`,
   and coordination with HA (section 5).
+
+### 4.4 Event-driven elastic controller implementation  [GAP] -- scoped
+Concrete work items to build the event-driven cloud elasticity (per
+`docs/cloud-elastic-event-driven-design.md`):
+- **M0** — add the `cloud_*` queue attributes end-to-end: model fields
+  (`internal/queue/queue.go`), `applyQueueAttrs` parsing, `formatQueueStatus`
+  display, and persistence (server restart). Enables config only.
+- **M1** — `pbs_sched` emits a JSON `NeedCapacity` event when jobs are left
+  unplaceable (`findNodeForJob` returns nil → `CanNotRun`), per cloud-backed
+  queue; a CEC event-loop service with in-flight guard and cooldown; CRP
+  adapter interface stubs (`ensure/describe/reclaim/resume/health`).
+- **M2** — Azure CRP driver + cloud-init bootstrap (install `pbs_mom`, point at
+  server, register) + dynamic node add via `qmgr create node`/RPC.
+- **M3** — event-driven scale-in: observe `NodeFree` → idle window →
+  drain → deregister → `deallocate`/`hibernate`; fast `resume` for hibernate.
+- **M4** — cooldown tuning, shortfall headroom, `NeedCapacity` merge/coalesce,
+  drain timeout policy, surface per-pool free-cores via a status RPC (extends
+  the `qstat -B` gap in 2.9).
+- Blockers (from the design's §11): multi-node jobs (1.4) affect shortfall
+  math; jobs larger than one SKU node cannot be placed; expose per-queue free
+  cores snapshot.
 
 ---
 
