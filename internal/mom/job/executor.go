@@ -245,16 +245,33 @@ func (e *Executor) buildEnvironment(j *Job) []string {
 
 	return env
 }
-
 // getWorkDir returns the working directory for a job.
+// PBS_O_WORKDIR is the submit node directory and frequently does not exist on a
+// remote or dynamically-provisioned execution node. Verify each candidate exists
+// before using it: a nonexistent cmd.Dir combined with Setsid makes exec fail with
+// a misleading "fork/exec /bin/sh: no such file or directory" even though the shell
+// itself is present.
 func (e *Executor) getWorkDir(j *Job) string {
+	candidates := []string{}
 	if wd, ok := j.VariableList["PBS_O_WORKDIR"]; ok {
-		return wd
+		candidates = append(candidates, wd)
 	}
 	if home, ok := j.VariableList["HOME"]; ok {
-		return home
+		candidates = append(candidates, home)
 	}
-	return os.Getenv("HOME")
+	if h := os.Getenv("HOME"); h != "" {
+		candidates = append(candidates, h)
+	}
+	for _, c := range candidates {
+		if c == "" {
+			continue
+		}
+		if fi, err := os.Stat(c); err == nil && fi.IsDir() {
+			return c
+		}
+	}
+	// Final fallback: a directory that always exists.
+	return "/"
 }
 
 // CleanupJob removes job spool files from disk.
