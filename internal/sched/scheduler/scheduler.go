@@ -83,12 +83,27 @@ func New(cfg *config.Config) *Scheduler {
 	}
 }
 
-// RunCycle performs one complete scheduling cycle:
+// RunCycle performs one complete scheduling cycle (unlimited):
 // 1. Query server for current state
 // 2. Build scheduling data structures
 // 3. Apply sorting and algorithm
 // 4. Dispatch jobs to nodes
 func (s *Scheduler) RunCycle(conn *client.Conn) (int, error) {
+	return s.runCycle(conn, false)
+}
+
+// RunCycleLimited performs a bounded scheduling cycle, used for event-triggered
+// runs from the pbs_server. It attempts at most DefaultQueueDepth jobs, starts
+// at most SchedMaxJobStart jobs, and yields after MaxSchedTime seconds. This
+// keeps a flurry of job-submit events from monopolizing the scheduler; the
+// periodic full cycle cleans up whatever a limited cycle leaves behind.
+func (s *Scheduler) RunCycleLimited(conn *client.Conn) (int, error) {
+	return s.runCycle(conn, true)
+}
+
+// runCycle is the shared scheduling engine. limited=true applies the queue
+// depth / max-start / max-time caps described on RunCycleLimited.
+func (s *Scheduler) runCycle(conn *client.Conn, limited bool) (int, error) {
 	// Query current state from server
 	sinfo, err := s.queryServer(conn)
 	if err != nil {
@@ -100,9 +115,26 @@ func (s *Scheduler) RunCycle(conn *client.Conn) (int, error) {
 
 	dispatched := 0
 
+	// Event-triggered (limited) cycle caps
+	maxAttempt := 0
+	maxStarts := 0
+	if limited {
+		maxAttempt = s.cfg.DefaultQueueDepth
+		maxStarts = s.cfg.SchedMaxJobStart
+	}
+	cycleStart := time.Now()
+
 	// Main scheduling loop: get next job, check resources, dispatch
 	jobIter := s.newJobIterator(sinfo)
-	for {
+	for attempt := 0; ; attempt++ {
+		if limited && maxAttempt > 0 && attempt >= maxAttempt {
+			log.Printf("[SCHED] Limited cycle: reached default_queue_depth=%d, stopping", maxAttempt)
+			break
+		}
+		if limited && s.cfg.MaxSchedTime > 0 && time.Since(cycleStart) >= time.Duration(s.cfg.MaxSchedTime)*time.Second {
+			log.Printf("[SCHED] Limited cycle: max_sched_time=%ds reached, yielding", s.cfg.MaxSchedTime)
+			break
+		}
 		jinfo := jobIter.next()
 		if jinfo == nil {
 			break
@@ -135,6 +167,10 @@ func (s *Scheduler) RunCycle(conn *client.Conn) (int, error) {
 		node.Jobs = append(node.Jobs, jinfo.ID)
 		dispatched++
 		log.Printf("[SCHED] Dispatched %s to %s", jinfo.ID, node.Name)
+		if limited && maxStarts > 0 && dispatched >= maxStarts {
+			log.Printf("[SCHED] Limited cycle: reached sched_max_job_start=%d, stopping", maxStarts)
+			break
+		}
 
 		// Update fair-share usage tracking
 		if s.cfg.FairShare {

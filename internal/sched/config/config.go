@@ -31,6 +31,20 @@ type Config struct {
 	SyncTime          time.Duration // Fair-share usage persistence interval
 	DedicatedPrefix   string        // Queue prefix for dedicated-time jobs
 	SchedulerInterval int           // Seconds between cycles (default 10)
+	// Event-driven / SLURM-style scheduling knobs (parallel to builtin)
+	EventDriven       bool // master switch for event notifications/trigger
+	SchedMinInterval  int  // ms between event-triggered (limited) cycles
+	DefaultQueueDepth int  // max jobs attempted per event-triggered limited cycle
+	SchedMaxJobStart  int  // max jobs started per single run (0=no limit)
+	MaxSchedTime      int  // sec cap for one scheduling run (0=no limit)
+	SchedDefer        bool // batch: do not dispatch immediately at submit
+	SchedDeferBatch   bool // defer applies only to batch jobs
+
+	// External scheduler event trigger (TCP notification from pbs_server).
+	// When >0, pbs_sched listens on 127.0.0.1:port; the pbs_server connects and
+	// writes a marker on job/node events so a limited cycle runs immediately
+	// instead of waiting for the polling ticker.
+	SchedTriggerPort int // localhost TCP trigger port (0=disabled)
 }
 
 // DefaultConfig returns a Config with default values.
@@ -52,6 +66,12 @@ func DefaultConfig(pbsHome string) *Config {
 		SyncTime:          1 * time.Hour,
 		DedicatedPrefix:   "ded",
 		SchedulerInterval: 10,
+		EventDriven:       true,
+		SchedMinInterval:  100,
+		DefaultQueueDepth: 100,
+		SchedMaxJobStart:  0,
+		MaxSchedTime:      2,
+		SchedTriggerPort:  25003,
 	}
 }
 
@@ -122,6 +142,36 @@ func Load(pbsHome string) *Config {
 		case "scheduler_interval":
 			if n, err := strconv.Atoi(val); err == nil {
 				cfg.SchedulerInterval = n
+			}
+		case "sched_interval":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.SchedulerInterval = n
+			}
+		case "event_driven":
+			cfg.EventDriven = parseBool(val)
+		case "sched_min_interval":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.SchedMinInterval = n
+			}
+		case "default_queue_depth":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.DefaultQueueDepth = n
+			}
+		case "sched_max_job_start":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.SchedMaxJobStart = n
+			}
+		case "max_sched_time":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.MaxSchedTime = n
+			}
+		case "defer":
+			cfg.SchedDefer = parseBool(val)
+		case "defer_batch":
+			cfg.SchedDeferBatch = parseBool(val)
+		case "sched_trigger_port":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.SchedTriggerPort = n
 			}
 		}
 	}

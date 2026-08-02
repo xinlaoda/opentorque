@@ -35,6 +35,15 @@ type Config struct {
 	JobForceCancelTime int // max seconds before force-cancel stuck jobs (default 0=off)
 	JobSyncTimeout     int // MOM sync timeout at startup (default 120)
 
+	// Event-driven scheduling (SLURM-style) - used by the builtin scheduler
+	EventDriven       bool // master switch: enable event notifications + trigger (default on)
+	SchedMinInterval  int  // ms between event-triggered (limited) cycles, anti-storm (default 100)
+	DefaultQueueDepth int  // max jobs attempted per event-triggered limited cycle (default 100)
+	SchedMaxJobStart  int  // max jobs actually started per single scheduling run (0=no limit)
+	MaxSchedTime      int  // sec cap for one scheduling run before yielding (default 2)
+	SchedDefer        bool // batch mode: do not dispatch immediately at submit, let jobs accumulate
+	SchedDeferBatch   bool // defer applies only to batch jobs
+	SchedTriggerPort   int  // external scheduler localhost TCP trigger port (0=disabled)
 	// Logging
 	LogLevel            int // event bitmask (default 511)
 	LogFileMaxSize      int // max server log size in bytes (default 0=unlimited)
@@ -47,23 +56,23 @@ type Config struct {
 	JobLogKeepDays      int
 
 	// Access control
-	Managers         string // comma-sep list of admin users (user@host)
-	Operators        string // comma-sep list of operator users
-	ACLHostEnable    bool
-	ACLHosts         string // comma-sep allowed submission hosts
-	ACLUserEnable    bool
-	ACLUsers         string // comma-sep allowed users
-	ACLRoots         string // comma-sep users with root access
-	ACLLogicOr       bool   // true=OR, false=AND for ACL evaluation
-	ACLGroupSloppy   bool
-	ACLUserHosts     string
-	ACLGroupHosts    string
+	Managers       string // comma-sep list of admin users (user@host)
+	Operators      string // comma-sep list of operator users
+	ACLHostEnable  bool
+	ACLHosts       string // comma-sep allowed submission hosts
+	ACLUserEnable  bool
+	ACLUsers       string // comma-sep allowed users
+	ACLRoots       string // comma-sep users with root access
+	ACLLogicOr     bool   // true=OR, false=AND for ACL evaluation
+	ACLGroupSloppy bool
+	ACLUserHosts   string
+	ACLGroupHosts  string
 
 	// Resource limits
-	MaxRunning       int // server-wide max running jobs (0=unlimited)
-	MaxUserRun       int // per-user max running jobs (0=unlimited)
-	MaxGroupRun      int // per-group max running jobs (0=unlimited)
-	MaxUserQueuable  int // per-user max queued jobs (0=unlimited)
+	MaxRunning       int               // server-wide max running jobs (0=unlimited)
+	MaxUserRun       int               // per-user max running jobs (0=unlimited)
+	MaxGroupRun      int               // per-group max running jobs (0=unlimited)
+	MaxUserQueuable  int               // per-user max queued jobs (0=unlimited)
 	ResourcesAvail   map[string]string // server-level available resources
 	ResourcesDefault map[string]string // default resource values for jobs
 	ResourcesMax     map[string]string // max resource limits per job
@@ -120,56 +129,61 @@ type Config struct {
 	PassCpuClock   bool
 
 	// Other
-	SubmitHosts             string
-	NodeSubmitExceptions    string
-	NodeSuffix              string
-	Comment                 string
-	LockFileUpdateTime      int
-	LockFileCheckTime       int
-	InteractiveJobsCanRoam  bool
-	LegacyVmem              bool
-	GhostArrayRecovery      bool
-	TCPIncomingTimeout      int
-	JobFullReportTime       int
+	SubmitHosts            string
+	NodeSubmitExceptions   string
+	NodeSuffix             string
+	Comment                string
+	LockFileUpdateTime     int
+	LockFileCheckTime      int
+	InteractiveJobsCanRoam bool
+	LegacyVmem             bool
+	GhostArrayRecovery     bool
+	TCPIncomingTimeout     int
+	JobFullReportTime      int
 }
 
 // NewConfig creates a Config with defaults for the given PBS home.
 func NewConfig(pbsHome string) *Config {
 	return &Config{
-		PBSHome:            pbsHome,
-		Port:               15001,
-		ServerPriv:         pbsHome + "/server_priv",
-		JobsDir:            pbsHome + "/server_priv/jobs",
-		QueuesDir:          pbsHome + "/server_priv/queues",
-		NodesFile:          pbsHome + "/server_priv/nodes",
-		ServerDB:           pbsHome + "/server_priv/serverdb",
-		LogDir:             pbsHome + "/server_logs",
-		AcctDir:            pbsHome + "/server_priv/accounting",
-		Scheduling:         true,
-		SchedulerMode:      "builtin",
-		SchedulerIteration: 10,
-		NodeCheckRate:      600,
-		TCPTimeout:         300,
-		KeepCompleted:      300,
-		PingRate:           300,
-		JobStartTimeout:    300,
-		JobSyncTimeout:     120,
-		LogLevel:           511,
-		LogFileRollDepth:   1,
-		QueryOtherJobs:     true,
-		MOMJobSync:         true,
-		MaxJobArraySize:    10000,
-		CloneBatchSize:     256,
-		CloneBatchDelay:    2,
+		PBSHome:                pbsHome,
+		Port:                   15001,
+		ServerPriv:             pbsHome + "/server_priv",
+		JobsDir:                pbsHome + "/server_priv/jobs",
+		QueuesDir:              pbsHome + "/server_priv/queues",
+		NodesFile:              pbsHome + "/server_priv/nodes",
+		ServerDB:               pbsHome + "/server_priv/serverdb",
+		LogDir:                 pbsHome + "/server_logs",
+		AcctDir:                pbsHome + "/server_priv/accounting",
+		Scheduling:             true,
+		SchedulerMode:          "builtin",
+		SchedulerIteration:     10,
+		EventDriven:            true,
+		SchedMinInterval:       100,
+		DefaultQueueDepth:      100,
+		SchedMaxJobStart:       0,
+		MaxSchedTime:           2,
+		NodeCheckRate:          600,
+		TCPTimeout:             300,
+		KeepCompleted:          300,
+		PingRate:               300,
+		JobStartTimeout:        300,
+		JobSyncTimeout:         120,
+		LogLevel:               511,
+		LogFileRollDepth:       1,
+		QueryOtherJobs:         true,
+		MOMJobSync:             true,
+		MaxJobArraySize:        10000,
+		CloneBatchSize:         256,
+		CloneBatchDelay:        2,
 		DisplayJobServerSuffix: true,
-		KillDelay:          2,
-		ExitCodeCanceledJob: 271,
-		TimeoutForJobDelete: 120,
-		TimeoutForJobRequeue: 120,
-		AutoRequeueExitCode: -1,
-		ResourcesAvail:   make(map[string]string),
-		ResourcesDefault:  make(map[string]string),
-		ResourcesMax:      make(map[string]string),
-		ResourcesCost:     make(map[string]string),
+		KillDelay:              2,
+		ExitCodeCanceledJob:    271,
+		TimeoutForJobDelete:    120,
+		TimeoutForJobRequeue:   120,
+		AutoRequeueExitCode:    -1,
+		ResourcesAvail:         make(map[string]string),
+		ResourcesDefault:       make(map[string]string),
+		ResourcesMax:           make(map[string]string),
+		ResourcesCost:          make(map[string]string),
 	}
 }

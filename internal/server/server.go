@@ -35,16 +35,16 @@ type Config struct {
 
 // Server is the main pbs_server daemon.
 type Server struct {
-	cfg       *config.Config
-	jobMgr    *job.Manager
-	queueMgr  *queue.Manager
-	nodeMgr   *node.Manager
-	listener  net.Listener
+	cfg      *config.Config
+	jobMgr   *job.Manager
+	queueMgr *queue.Manager
+	nodeMgr  *node.Manager
+	listener net.Listener
 
 	// Server state
-	mu         sync.RWMutex
-	state      int // SV_STATE_*
-	startTime  time.Time
+	mu        sync.RWMutex
+	state     int // SV_STATE_*
+	startTime time.Time
 
 	// Connection authentication map: "ip:port" -> username.
 	// Populated by trqauthd's AuthenUser request, consumed by the client
@@ -61,6 +61,12 @@ type Server struct {
 	// Scheduling
 	schedTicker *time.Ticker
 	nodeTicker  *time.Ticker
+
+	// Event-driven scheduling: buffered signal that a job or node event
+	// occurred (submit, completion, requeue, hold release, node change),
+	// prompting an immediate builtin-scheduler cycle without waiting for
+	// the sched_interval ticker.
+	schedEvent chan struct{}
 
 	// Shutdown
 	done chan struct{}
@@ -92,12 +98,13 @@ func New(cfg *Config) (*Server, error) {
 	icfg.ServerName = hostname
 
 	s := &Server{
-		cfg:      icfg,
-		jobMgr:   job.NewManager(hostname, 0),
-		queueMgr: queue.NewManager(),
-		nodeMgr:  node.NewManager(),
-		state:    SvStateInit,
-		done:     make(chan struct{}),
+		cfg:        icfg,
+		jobMgr:     job.NewManager(hostname, 0),
+		queueMgr:   queue.NewManager(),
+		nodeMgr:    node.NewManager(),
+		state:      SvStateInit,
+		schedEvent: make(chan struct{}, 1),
+		done:       make(chan struct{}),
 	}
 
 	// Initialize accounting logger
@@ -689,6 +696,8 @@ func (s *Server) handleJobScript(conn net.Conn, r *dis.Reader, hdr *dis.RequestH
 			j.Mu.RUnlock()
 			s.acctLog.RecordQueued(jobID, info)
 		}
+		// Signal the scheduler: a newly queued job is ready to dispatch.
+		s.triggerSched()
 	}
 
 	dis.SendOkReply(conn)
@@ -759,6 +768,8 @@ func (s *Server) handleCommit(conn net.Conn, r *dis.Reader, hdr *dis.RequestHead
 		s.acctLog.RecordQueued(jobID, info)
 	}
 
+	// Signal the scheduler: a newly queued job is ready to dispatch.
+	s.triggerSched()
 	dis.SendJobIDReply(conn, dis.ReplyChoiceCommit, jobID)
 	return true
 }
@@ -814,6 +825,7 @@ func (s *Server) handleDeleteJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestH
 	j.Mu.Lock()
 	state := j.State
 	queueName := j.Queue
+	execHost := j.ExecHost
 	j.Mu.Unlock()
 
 	// Write D (deleted) accounting record before removing the job
@@ -829,6 +841,10 @@ func (s *Server) handleDeleteJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestH
 		// Send kill signal to MOM (simplified: just mark as exiting)
 		log.Printf("[SERVER] Delete running job %s (will send kill to MOM)", jobID)
 		s.sendDeleteToMOM(j)
+
+		// Free the node slot(s) so a deleted running job does not leave the node
+		// stuck in job-exclusive with a stale job reference (previously leaked).
+		s.releaseNodeResources(execHost, jobID)
 	}
 
 	// Remove from queue counts
@@ -904,6 +920,7 @@ func (s *Server) handleReleaseJob(conn net.Conn, r *dis.Reader, hdr *dis.Request
 	j.Mu.Unlock()
 
 	log.Printf("[SERVER] Release job %s", jobID)
+	s.triggerSched() // a released job may now be schedulable
 	dis.SendOkReply(conn)
 	return true
 }
@@ -1332,6 +1349,7 @@ func (s *Server) handleRerunJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestHe
 
 	s.saveJob(j)
 	log.Printf("[SERVER] RerunJob %s requeued", jobID)
+	s.triggerSched()
 	dis.SendOkReply(conn)
 	return true
 }
@@ -1501,6 +1519,8 @@ func (s *Server) handleJobObit(conn net.Conn, r *dis.Reader, hdr *dis.RequestHea
 
 	// Resolve dependencies for jobs waiting on this completed job
 	s.resolveDependencies(jobID, exitStatus)
+	// Signal the scheduler: a node slot was freed by job completion.
+	s.triggerSched()
 
 	dis.SendOkReply(conn)
 	return true
@@ -1637,6 +1657,7 @@ func (s *Server) mgrSetNode(name string, attrs []dis.SvrAttrl) error {
 	}
 	s.applyNodeAttrs(n, attrs)
 	s.saveNodes()
+	s.triggerSched() // node capacity/state may have changed
 	return nil
 }
 
@@ -1671,6 +1692,23 @@ func (s *Server) mgrSetServer(attrs []dis.SvrAttrl) error {
 			fmt.Sscanf(a.Value, "%d", &s.cfg.JobForceCancelTime)
 		case "job_sync_timeout":
 			fmt.Sscanf(a.Value, "%d", &s.cfg.JobSyncTimeout)
+		// Event-driven scheduling (SLURM-style)
+		case "sched_interval":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.SchedulerIteration)
+		case "event_driven":
+			s.cfg.EventDriven = parseBool(a.Value)
+		case "sched_min_interval":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.SchedMinInterval)
+		case "default_queue_depth":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.DefaultQueueDepth)
+		case "sched_max_job_start":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.SchedMaxJobStart)
+		case "max_sched_time":
+			fmt.Sscanf(a.Value, "%d", &s.cfg.MaxSchedTime)
+		case "defer":
+			s.cfg.SchedDefer = parseBool(a.Value)
+		case "defer_batch":
+			s.cfg.SchedDeferBatch = parseBool(a.Value)
 		// Logging
 		case "log_events":
 			fmt.Sscanf(a.Value, "%d", &s.cfg.LogLevel)
@@ -2222,6 +2260,14 @@ func (s *Server) formatServerStatus() dis.StatusObject {
 
 	// Scheduling & timing
 	addInt("scheduler_iteration", s.cfg.SchedulerIteration)
+	addBool("event_driven", s.cfg.EventDriven)
+	addInt("sched_min_interval", s.cfg.SchedMinInterval)
+	addInt("default_queue_depth", s.cfg.DefaultQueueDepth)
+	addInt("sched_max_job_start", s.cfg.SchedMaxJobStart)
+	addInt("max_sched_time", s.cfg.MaxSchedTime)
+	addBool("defer", s.cfg.SchedDefer)
+	addBool("defer_batch", s.cfg.SchedDeferBatch)
+	addInt("sched_trigger_port", s.cfg.SchedTriggerPort)
 	addInt("node_check_rate", s.cfg.NodeCheckRate)
 	addInt("tcp_timeout", s.cfg.TCPTimeout)
 	addInt("keep_completed", s.cfg.KeepCompleted)
@@ -2689,25 +2735,116 @@ func (s *Server) startBackgroundTasks() {
 	go s.completedJobCleanup()
 }
 
-// schedulerLoop runs the built-in FIFO scheduler on a timer.
-// It picks queued jobs and dispatches them to available nodes.
+// schedulerLoop runs the built-in scheduler using a hybrid trigger model. It
+// waits on BOTH the periodic safety-net ticker (sched_interval, default 10s)
+// and an event channel signaled whenever a job or node event occurs (submit,
+// completion, requeue, hold release, node state change). Event-triggered
+// "limited" cycles respond quickly so jobs dispatch without waiting for the
+// ticker, while the periodic ticker remains the guaranteed fallback floor.
+func (s *Server) triggerSched() {
+	// Notify the external scheduler daemon (pbs_sched) when one is configured.
+	// This makes the external scheduler event-driven instead of purely polling:
+	// a job/node event triggers a limited cycle immediately, while the polling
+	// ticker remains the guaranteed fallback floor.
+	if s.cfg.SchedulerMode == "external" && s.cfg.EventDriven && s.cfg.SchedTriggerPort > 0 {
+		s.notifyExternalSched()
+	}
+	// Notify the built-in scheduler (same event channel is used only when the
+	// built-in loop is running). Non-blocking send coalesces a burst of events
+	// into a single scheduling cycle.
+	if s.schedEvent == nil {
+		return
+	}
+	select {
+	case s.schedEvent <- struct{}{}:
+	default:
+	}
+}
+
+// notifyExternalSched pings the external pbs_sched trigger socket. It is
+// best-effort and non-blocking: a short timeout avoids stalling RPC handling,
+// and errors are ignored because the scheduler's polling ticker is the floor.
+func (s *Server) notifyExternalSched() {
+	addr := fmt.Sprintf("127.0.0.1:%d", s.cfg.SchedTriggerPort)
+	conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	// Ignore errors - the marker is a soft hint.
+	conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+	conn.Write([]byte{1})
+}
+
 func (s *Server) schedulerLoop() {
+	minGap := time.Duration(s.cfg.SchedMinInterval) * time.Millisecond
+	if minGap <= 0 {
+		minGap = time.Millisecond
+	}
+	var lastRun time.Time
+
+	run := func(limited, deferWait bool) {
+		if !s.cfg.Scheduling {
+			return
+		}
+		// Anti-storm throttle: never run two cycles closer than
+		// sched_min_interval, and if defer is set wait the full gap so jobs
+		// can accumulate before the cycle runs (batching).
+		wait := 0 * time.Second
+		if !lastRun.IsZero() {
+			if d := time.Since(lastRun); d < minGap {
+				wait = minGap - d
+			}
+		}
+		if deferWait && wait < minGap {
+			wait = minGap
+		}
+		if wait > 0 {
+			select {
+			case <-time.After(wait):
+			case <-s.done:
+				return
+			}
+		}
+		s.runScheduler(limited)
+		lastRun = time.Now()
+	}
+
 	for {
 		select {
 		case <-s.done:
 			return
 		case <-s.schedTicker.C:
-			if s.cfg.Scheduling {
-				s.runScheduler()
+			// Full periodic sweep (the safety-net floor) — not queue-depth
+			// limited, catches anything the limited cycles left behind.
+			run(false, false)
+		case <-s.schedEvent:
+			// Event-driven cycle. If event-driven scheduling is disabled
+			// (legacy pure-poll behavior), ignore events and rely on ticker.
+			if !s.cfg.EventDriven {
+				continue
 			}
+			// Coalesce a burst: drain any further queued events so a large
+			// submission becomes a single cycle.
+			for draining := true; draining; {
+				select {
+				case <-s.schedEvent:
+				default:
+					draining = false
+				}
+			}
+			run(true, s.cfg.SchedDefer || s.cfg.SchedDeferBatch)
 		}
 	}
 }
 
-// runScheduler is the built-in FIFO job scheduler.
-// It iterates through queued jobs and dispatches them to free nodes.
-// It also promotes Waiting jobs whose execution time has passed.
-func (s *Server) runScheduler() {
+// runScheduler is the built-in FIFO job scheduler. It iterates through queued
+// jobs and dispatches them to free nodes, promotes Waiting jobs whose execution
+// time has passed, and honors the SLURM-style caps. When limited (an
+// event-triggered cycle), it only attempts default_queue_depth jobs and starts
+// at most sched_max_job_start; the periodic full sweep is unlimited. Both
+// cycles respect max_sched_time by yielding to other RPC handling.
+func (s *Server) runScheduler(limited bool) {
 	// Check for Waiting jobs whose deferred execution time has passed
 	s.promoteWaitingJobs()
 
@@ -2721,7 +2858,28 @@ func (s *Server) runScheduler() {
 		return queued[i].QueueTime.Before(queued[k].QueueTime)
 	})
 
+	start := time.Now()
+	maxAttempt := len(queued)
+	maxStarts := 0
+	if limited {
+		if s.cfg.DefaultQueueDepth > 0 && s.cfg.DefaultQueueDepth < maxAttempt {
+			maxAttempt = s.cfg.DefaultQueueDepth
+		}
+		if s.cfg.SchedMaxJobStart > 0 {
+			maxStarts = s.cfg.SchedMaxJobStart
+		}
+	}
+
+	attempted := 0
+	started := 0
 	for _, j := range queued {
+		if attempted >= maxAttempt {
+			break
+		}
+		if s.cfg.MaxSchedTime > 0 && time.Since(start) >= time.Duration(s.cfg.MaxSchedTime)*time.Second {
+			log.Printf("[SCHED] max_sched_time=%ds reached, yielding scheduler cycle", s.cfg.MaxSchedTime)
+			break
+		}
 		j.Mu.RLock()
 		if j.State != job.StateQueued {
 			j.Mu.RUnlock()
@@ -2729,12 +2887,15 @@ func (s *Server) runScheduler() {
 		}
 		j.Mu.RUnlock()
 
-		s.scheduleJob(j)
+		attempted++
+		if s.scheduleJob(j) {
+			started++
+			if maxStarts > 0 && started >= maxStarts {
+				break
+			}
+		}
 	}
 }
-
-// promoteWaitingJobs transitions jobs from Waiting to Queued state
-// when their deferred execution time (-a) has passed.
 func (s *Server) promoteWaitingJobs() {
 	now := time.Now()
 	for _, j := range s.jobMgr.AllJobs() {
@@ -2871,29 +3032,29 @@ func (s *Server) resolveDependencies(completedJobID string, exitStatus int) {
 }
 
 // scheduleJob attempts to place a single job on a compute node and dispatch it.
-func (s *Server) scheduleJob(j *job.Job) {
+func (s *Server) scheduleJob(j *job.Job) bool {
 	j.Mu.RLock()
 	if j.State != job.StateQueued {
 		j.Mu.RUnlock()
-		return
+		return false
 	}
 	j.Mu.RUnlock()
 
 	// Check job dependencies before scheduling
 	if !s.checkDependencies(j) {
-		return // Dependencies not yet satisfied
+		return false // Dependencies not yet satisfied
 	}
 
 	// Check server-wide and per-user/group run limits
 	if !s.enforceRunLimits(j) {
-		return // Limits exceeded, try again next cycle
+		return false // Limits exceeded, try again next cycle
 	}
 
 	// Find a node with available slots
 	neededSlots := 1
 	n, slots := s.nodeMgr.FindNodeForJob(neededSlots)
 	if n == nil {
-		return // No free nodes, try again next cycle
+		return false // No free nodes, try again next cycle
 	}
 
 	// Reserve the node for this job
@@ -2934,6 +3095,7 @@ func (s *Server) scheduleJob(j *job.Job) {
 
 	// Send job to MOM in a background goroutine
 	go s.dispatchJobToMOM(j, n)
+	return true
 }
 
 // dispatchJobToMOM sends a job (QueueJob + JobScript + Commit) to a MOM daemon.
@@ -3320,6 +3482,36 @@ func (s *Server) loadSchedConfig() {
 			if val == "external" || val == "builtin" {
 				s.cfg.SchedulerMode = val
 			}
+		case "sched_interval":
+			if n, err := strconv.Atoi(val); err == nil {
+				s.cfg.SchedulerIteration = n
+			}
+		case "event_driven":
+			s.cfg.EventDriven = (val == "true" || val == "1" || val == "on")
+		case "sched_min_interval":
+			if n, err := strconv.Atoi(val); err == nil {
+				s.cfg.SchedMinInterval = n
+			}
+		case "default_queue_depth":
+			if n, err := strconv.Atoi(val); err == nil {
+				s.cfg.DefaultQueueDepth = n
+			}
+		case "sched_max_job_start":
+			if n, err := strconv.Atoi(val); err == nil {
+				s.cfg.SchedMaxJobStart = n
+			}
+		case "max_sched_time":
+			if n, err := strconv.Atoi(val); err == nil {
+				s.cfg.MaxSchedTime = n
+			}
+		case "defer":
+			s.cfg.SchedDefer = (val == "true" || val == "1" || val == "on")
+		case "defer_batch":
+			s.cfg.SchedDeferBatch = (val == "true" || val == "1" || val == "on")
+		case "sched_trigger_port":
+			if n, err := strconv.Atoi(val); err == nil {
+				s.cfg.SchedTriggerPort = n
+			}
 		}
 	}
 }
@@ -3391,7 +3583,7 @@ func (s *Server) recoverServerDBXML(content string) {
 		"acl_user_hosts": "", "acl_group_hosts": "",
 		"max_running": "", "max_user_run": "", "max_group_run": "",
 		"max_user_queuable": "",
-		"mail_domain": "", "mail_from": "", "no_mail_force": "",
+		"mail_domain":       "", "mail_from": "", "no_mail_force": "",
 		"mail_subject_fmt": "", "mail_body_fmt": "", "email_batch_seconds": "",
 		"default_node": "", "node_pack": "", "query_other_jobs": "",
 		"mom_job_sync": "", "down_on_error": "", "disable_server_id_check": "",
@@ -3400,7 +3592,7 @@ func (s *Server) recoverServerDBXML(content string) {
 		"copy_on_rerun": "", "job_exclusive_on_use": "",
 		"disable_automatic_requeue": "", "automatic_requeue_exit_code": "",
 		"dont_write_nodes_file": "",
-		"max_job_array_size": "", "max_slot_limit": "",
+		"max_job_array_size":    "", "max_slot_limit": "",
 		"clone_batch_size": "", "clone_batch_delay": "",
 		"moab_array_compatible": "", "display_job_server_suffix": "",
 		"job_suffix_alias": "", "use_jobs_subdirs": "",
@@ -3424,9 +3616,9 @@ func (s *Server) recoverServerDBXML(content string) {
 	// Parse resource map tags: <resources_available.mem>4gb</resources_available.mem>
 	rescMaps := map[string]*map[string]string{
 		"resources_available": &s.cfg.ResourcesAvail,
-		"resources_default":  &s.cfg.ResourcesDefault,
-		"resources_max":      &s.cfg.ResourcesMax,
-		"resources_cost":     &s.cfg.ResourcesCost,
+		"resources_default":   &s.cfg.ResourcesDefault,
+		"resources_max":       &s.cfg.ResourcesMax,
+		"resources_cost":      &s.cfg.ResourcesCost,
 	}
 	for prefix, m := range rescMaps {
 		parseResourceMapXML(content, prefix, *m)
@@ -3479,6 +3671,22 @@ func (s *Server) applyServerDBAttr(key, val string) {
 	// Scheduling & timing
 	case "scheduler_iteration":
 		fmt.Sscanf(val, "%d", &s.cfg.SchedulerIteration)
+	case "event_driven":
+		s.cfg.EventDriven = parseBool(val)
+	case "sched_min_interval":
+		fmt.Sscanf(val, "%d", &s.cfg.SchedMinInterval)
+	case "default_queue_depth":
+		fmt.Sscanf(val, "%d", &s.cfg.DefaultQueueDepth)
+	case "sched_max_job_start":
+		fmt.Sscanf(val, "%d", &s.cfg.SchedMaxJobStart)
+	case "max_sched_time":
+		fmt.Sscanf(val, "%d", &s.cfg.MaxSchedTime)
+	case "defer":
+		s.cfg.SchedDefer = parseBool(val)
+	case "defer_batch":
+		s.cfg.SchedDeferBatch = parseBool(val)
+	case "sched_trigger_port":
+		fmt.Sscanf(val, "%d", &s.cfg.SchedTriggerPort)
 	case "node_check_rate":
 		fmt.Sscanf(val, "%d", &s.cfg.NodeCheckRate)
 	case "tcp_timeout":
@@ -3879,6 +4087,14 @@ func (s *Server) saveServerDB() {
 
 	// Scheduling & timing
 	writeInt("scheduler_iteration", s.cfg.SchedulerIteration)
+	writeBool("event_driven", s.cfg.EventDriven)
+	writeInt("sched_min_interval", s.cfg.SchedMinInterval)
+	writeInt("default_queue_depth", s.cfg.DefaultQueueDepth)
+	writeInt("sched_max_job_start", s.cfg.SchedMaxJobStart)
+	writeInt("max_sched_time", s.cfg.MaxSchedTime)
+	writeBool("defer", s.cfg.SchedDefer)
+	writeBool("defer_batch", s.cfg.SchedDeferBatch)
+	writeInt("sched_trigger_port", s.cfg.SchedTriggerPort)
 	writeInt("node_check_rate", s.cfg.NodeCheckRate)
 	writeInt("tcp_timeout", s.cfg.TCPTimeout)
 	writeInt("keep_completed", s.cfg.KeepCompleted)
