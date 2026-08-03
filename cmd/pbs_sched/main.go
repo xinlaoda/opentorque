@@ -22,7 +22,7 @@ import (
 
 	"github.com/xinlaoda/opentorque/internal/cec"
 	"github.com/xinlaoda/opentorque/internal/crp"
-	"github.com/xinlaoda/opentorque/internal/dis"
+	"github.com/xinlaoda/opentorque/internal/sched/dis"
 	"github.com/xinlaoda/opentorque/internal/sched/client"
 	"github.com/xinlaoda/opentorque/internal/sched/config"
 	"github.com/xinlaoda/opentorque/internal/sched/scheduler"
