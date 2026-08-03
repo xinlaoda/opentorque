@@ -22,6 +22,7 @@ import (
 
 	"github.com/xinlaoda/opentorque/internal/cec"
 	"github.com/xinlaoda/opentorque/internal/crp"
+	"github.com/xinlaoda/opentorque/internal/dis"
 	"github.com/xinlaoda/opentorque/internal/sched/client"
 	"github.com/xinlaoda/opentorque/internal/sched/config"
 	"github.com/xinlaoda/opentorque/internal/sched/scheduler"
@@ -73,6 +74,7 @@ func main() {
 	}
 	cecStop := make(chan struct{})
 	cecCtrl := cec.New(crp.NewAzureCRP(azureSub))
+	cecCtrl.SetNodeController(&serverNodeController{server: cfg.Server})
 	go cecCtrl.Run(cecStop)
 	log.Printf("[SCHED] Cloud Elastic Controller armed (provider=azure/M2, subscription=%s)", azureSub)
 
@@ -264,7 +266,36 @@ func runOneCycle(sched *scheduler.Scheduler, cfg *config.Config, limited bool, c
 	// a capacity shortfall.
 	for _, q := range ct.queues() {
 		ct.ctrl.RegisterNodesUp(q, res.FreeNodes)
+		ct.ctrl.RegisterNodesIdle(q, res.IdleNodes)
 	}
+}
+
+// serverNodeController implements cec.NodeController against the live PBS
+// server using the existing scheduler wire client: draining sets the node
+// state to "offline" (the scheduler refuses offline nodes), and deregistration
+// deletes the node from the server database. It dials a fresh connection per
+// call so it stays independent of the scheduler cycle connection lifecycle.
+type serverNodeController struct {
+	server string
+}
+
+func (n *serverNodeController) DrainNode(name string) error {
+	conn, err := client.Connect(n.server)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer conn.Close()
+	attrs := []dis.SvrAttrl{{Name: "state", Value: "offline", Op: 1}}
+	return conn.Manager(dis.MgrCmdSet, dis.MgrObjNode, name, attrs)
+}
+
+func (n *serverNodeController) DeregisterNode(name string) error {
+	conn, err := client.Connect(n.server)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer conn.Close()
+	return conn.Manager(dis.MgrCmdDelete, dis.MgrObjNode, name, nil)
 }
 
 // cloudTracker remembers the set of cloud-backed queues seen so the scheduler

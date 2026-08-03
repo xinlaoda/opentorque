@@ -88,30 +88,70 @@ type Pool struct {
 	Inflight int              // VMs being provisioned (Ensured, not yet up)
 	Provisioning map[string]string // vmID -> jobID bound during boot
 
+	// Owned tracks dynamic nodes this pool created and currently manages
+	// (keyed by node name == VM name/id). A node stays Owned from the moment
+	// it is created until it is reclaimed. Used to determine scale-in
+	// candidates independent of the transient provisioning map.
+	Owned map[string]bool
+	// IdleSince holds name -> time the node last became idle (no running
+	// jobs). A node remains an idle candidate only while it is in both Owned
+	// and IdleSince for >= IdleTime.
+	IdleSince map[string]time.Time
+
 	CooldownUntil time.Time
 	LastScale     time.Time
-	// node -> idleSince for scale-in timers (M3)
-	IdleSince map[string]time.Time
 }
 
 // Controller is the Cloud Elastic Controller.
+// NodeController is how the CEC drains and deregisters a node from the PBS
+// server. It is injected by the caller (pbs_sched) and keeps the CEC decoupled
+// from the wire client so the scale-in logic stays unit-testable.
+type NodeController interface {
+	// DrainNode marks a node offline so the scheduler stops dispatching jobs
+	// to it during scale-in.
+	DrainNode(name string) error
+	// DeregisterNode removes the node from the server's node database.
+	DeregisterNode(name string) error
+}
+
 type Controller struct {
 	mu       sync.Mutex
 	provider crp.Provider
 	pools    map[string]*Pool // by queue name
 	Events   chan Event
 	Cooldown time.Duration
+	nodes    NodeController
+	// reclaimInterval is how often the CEC checks per-node idle timers for
+	// scale-in. It is the only regular timer in the controller; capacity
+	// decisions remain event-driven.
+	reclaimInterval time.Duration
 }
 
 // New creates a Controller wired to a single provider (M1: stub). For M2+
 // multiple providers are supported via a registry; for now route by queue.
 func New(provider crp.Provider) *Controller {
 	return &Controller{
-		provider: provider,
-		pools:    make(map[string]*Pool),
-		Events:   make(chan Event, 1024),
-		Cooldown: 30 * time.Second,
+		provider:        provider,
+		pools:           make(map[string]*Pool),
+		Events:          make(chan Event, 1024),
+		Cooldown:        30 * time.Second,
+		reclaimInterval: 3 * time.Second,
 	}
+}
+
+// SetNodeController injects the node drain/deregister adapter. Call it before
+// Run. If never set, scale-in stalemates (logs) but does not crash.
+func (c *Controller) SetNodeController(nc NodeController) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.nodes = nc
+}
+
+// SetReclaimInterval overrides the idle-check cadence (mainly for tests).
+func (c *Controller) SetReclaimInterval(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.reclaimInterval = d
 }
 
 // PoolFor returns (creating if needed) the pool object for a queue based on an
@@ -136,6 +176,7 @@ func (c *Controller) ensurePool(ev Event) *Pool {
 			RGName:        ev.RGName,
 			ServerAddr:    ev.ServerAddr,
 			Provisioning:  make(map[string]string),
+			Owned:         make(map[string]bool),
 			IdleSince:     make(map[string]time.Time),
 		}
 		c.pools[ev.Queue] = p
@@ -162,6 +203,8 @@ func (c *Controller) ensurePool(ev Event) *Pool {
 // Run is the CEC main event loop. It returns when stop is closed.
 func (c *Controller) Run(stop <-chan struct{}) {
 	log.Printf("[CEC] Cloud Elastic Controller started (provider=%s, cooldown=%s)", c.provider.Name(), c.Cooldown)
+	ticker := time.NewTicker(c.reclaimInterval)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-stop:
@@ -169,8 +212,81 @@ func (c *Controller) Run(stop <-chan struct{}) {
 			return
 		case ev := <-c.Events:
 			c.handle(ev)
+		case <-ticker.C:
+			c.reclaimIdle()
 		}
 	}
+}
+
+// reclaimIdle sweeps every pool and reclaims (drain + deregister + CRP
+// Reclaim) any owned node that has been idle for >= IdleTime, as long as the
+// pool can still shrink (Running > MinNodes). This is the only timer in the
+// CEC; it only advances pre-existing idle windows, it never triggers a
+// capacity (scale-out) decision on its own.
+func (c *Controller) reclaimIdle() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	for qname, p := range c.pools {
+		if p.IdleTime <= 0 {
+			continue
+		}
+		if p.Running <= p.MinNodes {
+			continue
+		}
+		var candidates []string
+		for name, idleSince := range p.IdleSince {
+			if now.Sub(idleSince) < p.IdleTime {
+				continue
+			}
+			candidates = append(candidates, name)
+		}
+		for _, name := range candidates {
+			c.reclaimNodeLocked(qname, p, name, now)
+		}
+	}
+}
+
+// reclaimNodeLocked drains, deregisters, and cloud-reclaims one idle dynamic
+// node. Called with the controller lock held.
+func (c *Controller) reclaimNodeLocked(qname string, p *Pool, name string, now time.Time) {
+	nodes := c.nodes
+	if nodes == nil {
+		log.Printf("[CEC] queue=%s want to reclaim idle node %s but no NodeController set; skipping", qname, name)
+		delete(p.IdleSince, name)
+		return
+	}
+	policy := p.Reclaim
+	if policy == "" {
+		policy = "deallocate"
+	}
+	log.Printf("[CEC] queue=%s reclaiming idle node %s (policy=%s, running=%d min=%d)", qname, name, policy, p.Running, p.MinNodes)
+
+	// 1. Drain: mark offline so the scheduler stops dispatching to this node.
+	if err := nodes.DrainNode(name); err != nil {
+		log.Printf("[CEC] queue=%s drain node %s failed: %v; aborting reclaim", qname, name, err)
+		return
+	}
+	// 2. Deregister: remove the node from the server database.
+	if err := nodes.DeregisterNode(name); err != nil {
+		log.Printf("[CEC] queue=%s deregister node %s failed: %v; keeping node", qname, name, err)
+		return
+	}
+	// 3. Stop / deallocate / destroy the backing VM.
+	destroy := false
+	if policy == "destroy" {
+		destroy = true
+	}
+	if err := c.provider.Reclaim(crp.VMRef{Provider: p.Provider, VMID: name}, policy, destroy); err != nil {
+		log.Printf("[CEC] queue=%s provider reclaim of %s failed: %v (node already deregistered)", qname, name, err)
+	}
+
+	delete(p.Owned, name)
+	delete(p.IdleSince, name)
+	if p.Running > 0 {
+		p.Running--
+	}
+	log.Printf("[CEC] queue=%s reclaimed node %s, running=%d", qname, name, p.Running)
 }
 
 func (c *Controller) handle(ev Event) {
@@ -257,24 +373,16 @@ func (c *Controller) handleCapacity(ev Event) {
 }
 
 func (c *Controller) handleNodeFree(ev Event) {
-	p := c.ensurePool(ev)
-	if p.IdleTime <= 0 {
-		return
-	}
-	// Start/refresh idle timer for scale-in (resolved in M3).
-	if _, ok := p.IdleSince[ev.Queue]; !ok {
-		p.IdleSince[ev.Queue] = time.Now()
-	}
+	_ = c.ensurePool(ev)
+	log.Printf("[CEC] queue=%s node-free event (idle tracking is driven by RegisterNodesIdle)", ev.Queue)
 }
 
+// handleNodeIdle is driven by the reclaim sweep (reclaimIdle). It is retained
+// for the event taxonomy but does not itself act; the reclaim path lives in
+// reclaimNodeLocked so that draining/deregistering is done exactly once.
 func (c *Controller) handleNodeIdle(ev Event) {
-	p := c.ensurePool(ev)
-	// M3: drain + deregister + reclaim. M1 logs only.
-	log.Printf("[CEC] queue=%s node idle detected (scale-in hook; M3)", ev.Queue)
-	delete(p.IdleSince, ev.Queue)
-	if p.Running > p.MinNodes {
-		p.Running--
-	}
+	_ = c.ensurePool(ev)
+	log.Printf("[CEC] queue=%s node-idle event (handled by reclaim sweep)", ev.Queue)
 }
 
 func (c *Controller) handleNodeDown(ev Event) {
@@ -316,8 +424,42 @@ func (c *Controller) RegisterNodesUp(queue string, nodes []string) {
 		if p.Inflight > 0 {
 			p.Inflight--
 		}
+		p.Owned[n] = true
 		p.Running++
 		log.Printf("[CEC] queue=%s node up (vm=%s), running=%d inflight=%d", queue, n, p.Running, p.Inflight)
+	}
+}
+
+// RegisterNodesIdle records, for each known cloud queue, the current set of
+// nodes that are idle (no running jobs, free capacity). For every owned node
+// the CEC starts/refreshes an idle timer when it is in the reported set and
+// clears the timer when it leaves it (i.e. it became busy). This drives the
+// scale-in idle window. Static (non-owned) nodes are ignored.
+func (c *Controller) RegisterNodesIdle(queue string, idleNodes []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	p, ok := c.pools[queue]
+	if !ok {
+		return
+	}
+	inIdle := make(map[string]bool, len(idleNodes))
+	for _, n := range idleNodes {
+		inIdle[n] = true
+	}
+	// Seed idle timers / mark which owned nodes are currently idle.
+	now := time.Now()
+	for name := range p.Owned {
+		if inIdle[name] {
+			if _, ok := p.IdleSince[name]; !ok {
+				p.IdleSince[name] = now
+				log.Printf("[CEC] queue=%s node %s idle timer started", queue, name)
+			}
+		} else {
+			if _, wasIdle := p.IdleSince[name]; wasIdle {
+				delete(p.IdleSince, name)
+				log.Printf("[CEC] queue=%s node %s busy; idle timer cleared", queue, name)
+			}
+		}
 	}
 }
 

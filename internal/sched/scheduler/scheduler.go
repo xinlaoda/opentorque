@@ -112,6 +112,7 @@ type CycleResult struct {
 	Dispatched     int
 	CapacityEvents []CapacityEvent
 	FreeNodes      []string // names of nodes with available capacity after this cycle
+	IdleNodes      []string // names of nodes with no running jobs and free capacity (scale-in candidates)
 }
 
 // ServerInfo holds the complete server state snapshot for one scheduling cycle.
@@ -313,6 +314,12 @@ func (s *Scheduler) runCycle(conn *client.Conn, limited bool) (*CycleResult, err
 	for _, n := range sinfo.Nodes {
 		if n.FreeCPUs > 0 {
 			res.FreeNodes = append(res.FreeNodes, n.Name)
+		}
+		// A node is a scale-in (idle) candidate when it carries no running
+		// jobs and has free capacity. Nodes that are down/offline already or
+		// that carry jobs are excluded.
+		if len(n.Jobs) == 0 && n.FreeCPUs > 0 {
+			res.IdleNodes = append(res.IdleNodes, n.Name)
 		}
 	}
 
