@@ -171,21 +171,29 @@ func (q *Queue) IncrJobCount(state int) {
 	}
 }
 
-// DecrJobCount decrements the job count for a queue and state.
+// DecrJobCount decrements the job count for a queue and state. Guards against
+// underflow so counters never go negative even if a decrement is repeated for
+// a job that was not previously counted (see TODO 3.6).
 func (q *Queue) DecrJobCount(state int) {
 	q.Mu.Lock()
 	defer q.Mu.Unlock()
-	q.TotalJobs--
-	if state >= 0 && state < len(q.StateJobs) {
+	if q.TotalJobs > 0 {
+		q.TotalJobs--
+	}
+	if state >= 0 && state < len(q.StateJobs) && q.StateJobs[state] > 0 {
 		q.StateJobs[state]--
 	}
 }
 
 // TransferJobState adjusts counts when a job changes state within a queue.
+// The per-state counters are guarded against underflow so they never go
+// negative under churn (repeated qdel of running jobs, state transitions,
+// qmove) — see TODO 3.6. TotalJobs is intentionally unchanged (a transfer
+// does not change the number of jobs in the queue).
 func (q *Queue) TransferJobState(oldState, newState int) {
 	q.Mu.Lock()
 	defer q.Mu.Unlock()
-	if oldState >= 0 && oldState < len(q.StateJobs) {
+	if oldState >= 0 && oldState < len(q.StateJobs) && q.StateJobs[oldState] > 0 {
 		q.StateJobs[oldState]--
 	}
 	if newState >= 0 && newState < len(q.StateJobs) {

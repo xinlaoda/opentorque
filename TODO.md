@@ -89,29 +89,33 @@ flags, dropped — see 2.3).
 No backfill, no job reservations, no preemption. These are core to throughput
 on heterogeneous/multi-queue clusters.
 
-### 2.3 [BUG] `qsub` multiple `-l` flags overwrite each other
-`qsub -l ncpus=4 -l walltime=01:00:00` keeps only the **last** `-l` value —
-`ncpus` is silently dropped. Root cause: `cmd/qsub/main.go` uses
-`flag.String("l", ...)`, and Go's `flag` package overwrites repeated flags.
-- Workaround today: `qsub -l "ncpus=4,walltime=01:00:00"` (single `-l`).
-- Expected (TORQUE-compatible): accumulate all `-l` occurrences, or reject
-  malformed input.
+### 2.3 [BUG] `qsub` multiple `-l` flags overwrite each other  [DONE — fixed & live-tested]
+`cmd/qsub/main.go` now uses a repeatable flag value (`concatValue`) registered
+with `flag.Var`, so every `-l` occurrence is accumulated comma-joined instead of
+overwriting the previous one — matching TORQUE's merge behavior.
+- Live test (2026-08-03, Azure RG `xxin-opentorque-test`): `echo 'sleep 2' |
+  qsub -q testq -l ncpus=1 -l walltime=01:00:00` produced a job whose
+  `qstat -f` showed **both** `Resource_List.ncpus = 1` and
+  `Resource_List.walltime = 01:00:00` (previously only the last `-l` survived).
 
-### 2.4 [BUG] `qstat -f <job-id>` returns `server error 15001` for short IDs
-`qstat -f <jobnum>` (short job number, e.g. `qstat -f 10`) fails with
-`PbseUnkjobid (15001)`, while `qstat -f <jobnum>.<server>` (full ID, e.g.
-`qstat -f 10.xxin-opentorque-srv`) works for any state (queued/running/completed).
-Root cause: `handleStatusJob` looks up `jobMgr.GetJob(id)` by exact ID and no
-short-ID (`<jobnum>` -> `<jobnum>.<server>`) resolution exists on the server.
-`qdel`/`qrun` short IDs hit the same gap. The server log's
-`Read proto error ... ReadUint: EOF` is the client closing after receiving the
-15001 reply, not a server-side crash. Fix: resolve short ids against the
-`server_name` in the server request handlers (see also 2.5).
+### 2.4 [BUG] `qstat -f <job-id>` returns `server error 15001` for short IDs  [DONE — fixed & live-tested]
+Root cause: `jobMgr.GetJob(id)` matched only the exact full ID and there was no
+short-ID (`<jobnum>` -> `<jobnum>.<server>`) resolution. Fixed centrally in
+`internal/job/manager.go`: `GetJob` now trims the ID, tries the exact key, and
+if there is no `.` in the ID resolves `<jobnum>` against the manager's
+`serverName` (also case-insensitive on the suffix) so `qstat`/`qdel`/`qrun` all
+benefit.
+- Live test (2026-08-03, Azure): `qstat -f 50` (short) returned full job status
+  (was 15001); `qdel <shortid>` succeeded; `qrun -H <node> <shortid>` force-ran a
+  queued job (was 15001).
 
-### 2.5 [BUG] `qrun <node> <job>` returns 15001
-The only way to force a job onto a specific node (`handleRunJob` with a `dest`)
-currently errors with `15001` on the deployed build, preventing manual node
-pinning. Needs root-cause (see 1.1/5.2 `qstat -f` for a possibly related cause).
+### 2.5 [BUG] `qrun <node> <job>` returns 15001  [DONE — fixed & live-tested]
+The 15001 came from `handleRunJob` being unable to resolve a **short** job ID via
+`jobMgr.GetJob`. Resolved by the 2.4 short-ID fix in `internal/job/manager.go`.
+- Live test (2026-08-03, Azure): with `pbsnodes -o xxin-opentorque-srv` to hold a
+  job in `Q`, `qrun -H xxin-opentorque-srv <shortid>` returned success (exit 0)
+  and the job transitioned `Q -> R` on `srv/0`. The 15001 is gone; a job that is
+  already running now correctly returns `15004` (not 15001).
 
 ### 2.6 Node CPU-accounting strength  [GAP]
 Node selection uses `FreeCPUs = NumProcs - len(node.Jobs)` (one count per job),
@@ -257,18 +261,24 @@ attributes the scheduler consumes are **three different sets**:
   route destinations, and queue priority end-to-end, or document them as
   unsupported and remove the misleading stub fields.
 
-### 3.6 [BUG] Negative queue/server job counters
-Queue and server job counters go stale and can go **negative** under churn
-(repeated `qdel` of running jobs, state transitions, `qmove`). Observed on a
-live node: `qmgr p q` showed `debug total_jobs = -1`, and server
-`state_count` reported `Running:-4 Complete:-29`. Root cause is a
-multiple-decrement path in `TransferJobState` / `DecrJobCount` /
-`handleMoveJob` (or the delete path) — a counter is decremented even when the
-job was not previously counted, or a move double-counts.
-- Where: `internal/queue/queue.go` (`TransferJobState`), `internal/server/
-  server.go` (`handleDeleteJob`, `handleMoveJob`).
-- Expected: counters must never go negative; treat them as derived from the
-  live job set (recompute on query) or guard all decrements.
+### 3.6 [BUG] Negative queue/server job counters  [DONE — fixed & live-tested]
+Root causes fixed:
+- **From live testing** the drift is driven by `handleMoveJob`:
+  `TransferJobState` only moves between state slots and never touches
+  `TotalJobs`, so moving a job left the old queue's `TotalJobs` permanently too
+  high (observed `total_jobs = 13` with zero actual jobs after churn).
+  `handleMoveJob` now uses `oq.DecrJobCount(oldState)` +
+  `newQ.IncrJobCount(oldState)` which update both `TotalJobs` and the state slot.
+- `queue.DecrJobCount`/`TransferJobState` and `job.Manager.RemoveJob`/
+  `UpdateJobState` now guard every decrement (`> 0`) so counters never go
+  negative.
+- `formatQueueStatus` now calls `refreshQueueCounts` which recomputes
+  `TotalJobs` and the per-state counts from the **live job set** (`JobsInQueue`)
+  at query time, so `qmgr`/`qstat` always report numbers consistent with reality
+  regardless of any residual in-memory drift.
+- Live test (2026-08-03, Azure): after 20x submit+`qmove`+`qdel` and 15x
+  `qdel`-of-running churn cycles, `testq`/`testq2` counters stayed `0`/all-zeros
+  matching the (0) actual jobs, and no negative value was ever reported.
 
 ### 3.7 Target-queue admission control (gatekeeping) for routing  [GAP]
 For automatic routing (3.1) to be useful, a target execution queue must be able

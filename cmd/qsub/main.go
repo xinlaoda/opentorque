@@ -20,11 +20,32 @@ import (
 	"github.com/xinlaoda/opentorque/internal/cli/dis"
 )
 
+// concatValue is a flag.Value that accumulates every occurrence of a repeatable
+// flag (e.g. `-l ncpus=4 -l walltime=01:00:00`) into a single, comma-joined
+// value, matching TORQUE's behavior of merging multiple `-l` options. Using the
+// stock flag.String would silently keep only the last `-l` occurrence.
+type concatValue struct {
+	parts []string
+}
+
+func (c *concatValue) String() string { return strings.Join(c.parts, ",") }
+
+func (c *concatValue) Set(s string) error {
+	if s = strings.TrimSpace(s); s != "" {
+		c.parts = append(c.parts, s)
+	}
+	return nil
+}
+
+func (c *concatValue) get() string { return c.String() }
+
 func main() {
+	resources := &concatValue{}
+	flag.Var(resources, "l", "Resource list (repeatable; e.g., -l ncpus=4 -l walltime=01:00:00)")
+
 	var (
 		queue      = flag.String("q", "", "Destination queue")
 		name       = flag.String("N", "", "Job name")
-		resources  = flag.String("l", "", "Resource list (e.g., nodes=1:ppn=4,walltime=01:00:00)")
 		outPath    = flag.String("o", "", "Path for stdout")
 		errPath    = flag.String("e", "", "Path for stderr")
 		joinOutput = flag.String("j", "", "Join stdout/stderr (oe or eo)")
@@ -105,7 +126,7 @@ func main() {
 	}
 
 	// Build job attributes
-	attrs := buildAttrs(*name, *resources, *outPath, *errPath, *joinOutput,
+	attrs := buildAttrs(*name, resources.get(), *outPath, *errPath, *joinOutput,
 		*mailOpts, *mailUser, *workDir, *varList, *exportAll,
 		*account, *checkpoint, *keepFiles, *shell, *rerunnable,
 		*execTime, *priority, *holdJob, *faultTol, *arrayReq,

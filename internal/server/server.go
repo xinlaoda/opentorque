@@ -1288,11 +1288,16 @@ func (s *Server) handleMoveJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestHea
 	j.Queue = queueName
 	j.Mu.Unlock()
 
-	// Update queue counters
+	// Update queue counters. A move decrements the source queue (job left,
+	// TotalJobs and StateJobs) and increments the destination queue (job
+	// entered). TransferJobState only moves between state slots and does NOT
+	// touch TotalJobs, so it must not be used here — otherwise TotalJobs drifts
+	// (stays too high in the old queue, too low in the new one) under churn
+	// (see TODO 3.6).
 	if oq := s.queueMgr.GetQueue(oldQueue); oq != nil {
-		oq.TransferJobState(oldState, -1) // remove from old queue count
+		oq.DecrJobCount(oldState)
 	}
-	newQ.TransferJobState(-1, oldState) // add to new queue count
+	newQ.IncrJobCount(oldState)
 
 	s.saveJob(j)
 	log.Printf("[SERVER] MoveJob %s from %s to %s", jobID, oldQueue, queueName)
@@ -2200,8 +2205,29 @@ func (s *Server) formatJobStatus(j *job.Job) dis.StatusObject {
 	return dis.StatusObject{Type: dis.MgrObjJob, Name: j.ID, Attrs: attrs}
 }
 
+// refreshQueueCounts recomputes a queue's TotalJobs and per-state counters from
+// the live job set instead of trusting incrementally-maintained counters. The
+// maintained counters drift under churn (repeated qdel/qmove), which made
+// qmgr/qstat report stale or even negative totals (see TODO 3.6). Deriving them
+// from the live job set on query keeps the reported numbers always accurate.
+func (s *Server) refreshQueueCounts(q *queue.Queue) {
+	total := 0
+	var states [7]int
+	for _, j := range s.jobMgr.JobsInQueue(q.Name) {
+		total++
+		if st := j.State; st >= 0 && st < len(states) {
+			states[st]++
+		}
+	}
+	q.Mu.Lock()
+	q.TotalJobs = total
+	q.StateJobs = states
+	q.Mu.Unlock()
+}
+
 // formatQueueStatus builds a StatusObject for a queue.
 func (s *Server) formatQueueStatus(q *queue.Queue) dis.StatusObject {
+	s.refreshQueueCounts(q)
 	q.Mu.RLock()
 	defer q.Mu.RUnlock()
 

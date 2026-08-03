@@ -4,6 +4,7 @@ package job
 import (
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 )
 
@@ -62,12 +63,13 @@ func (m *Manager) AddJob(j *Job) {
 	log.Printf("[JOB] Added job %s (state=%s, queue=%s)", j.ID, j.StateName(), j.Queue)
 }
 
-// RemoveJob removes a job from the manager.
+// RemoveJob removes a job from the manager. The per-state counter is guarded
+// against underflow so it never goes negative (see TODO 3.6).
 func (m *Manager) RemoveJob(id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if j, ok := m.jobs[id]; ok {
-		if j.State >= 0 && j.State < len(m.stateCounts) {
+		if j.State >= 0 && j.State < len(m.stateCounts) && m.stateCounts[j.State] > 0 {
 			m.stateCounts[j.State]--
 		}
 		delete(m.jobs, id)
@@ -75,11 +77,33 @@ func (m *Manager) RemoveJob(id string) {
 	}
 }
 
-// GetJob returns a job by ID, or nil if not found.
+// GetJob returns a job by ID, or nil if not found. It accepts both the full
+// "<jobnum>.<server>" form and a bare short ID "<jobnum>", which is resolved
+// against this manager's server name — matching TORQUE's short-job-ID support
+// used by qstat -f / qdel / qrun. The server name suffix is case-insensitive.
 func (m *Manager) GetJob(id string) *Job {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.jobs[id]
+	id = strings.TrimSpace(id)
+	if j, ok := m.jobs[id]; ok {
+		return j
+	}
+	if strings.Contains(id, ".") {
+		return nil
+	}
+	// Short ID: try "<jobnum>.<server>" with this manager's server name.
+	full := id + "." + m.serverName
+	if j, ok := m.jobs[full]; ok {
+		return j
+	}
+	// Tolerate a case mismatch anywhere in the server-name suffix: scan the
+	// live jobs once (short IDs are rare; the map is small).
+	for stored, j := range m.jobs {
+		if dot := strings.IndexByte(stored, '.'); dot >= 0 && stored[:dot] == id && strings.EqualFold(stored[dot+1:], m.serverName) {
+			return j
+		}
+	}
+	return nil
 }
 
 // UpdateJobState changes a job's state and updates counters.
@@ -90,9 +114,9 @@ func (m *Manager) UpdateJobState(id string, newState, newSubstate int) {
 	if !ok {
 		return
 	}
-	// Adjust state counters
+	// Adjust state counters (old-state decrement guarded against underflow — see TODO 3.6)
 	oldState := j.State
-	if oldState >= 0 && oldState < len(m.stateCounts) {
+	if oldState >= 0 && oldState < len(m.stateCounts) && m.stateCounts[oldState] > 0 {
 		m.stateCounts[oldState]--
 	}
 	j.SetState(newState, newSubstate)
