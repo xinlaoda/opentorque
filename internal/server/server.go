@@ -2261,6 +2261,9 @@ func (s *Server) formatQueueStatus(q *queue.Queue) dis.StatusObject {
 	if q.CloudIdleTime > 0 {
 		add("cloud_idle_time", strconv.Itoa(q.CloudIdleTime))
 	}
+	if q.CloudProvisionTimeout > 0 {
+		add("cloud_provision_timeout", strconv.Itoa(q.CloudProvisionTimeout))
+	}
 	if q.CloudReclaim != "" {
 		add("cloud_reclaim", q.CloudReclaim)
 	}
@@ -2800,6 +2803,8 @@ func (s *Server) applyQueueAttrs(q *queue.Queue, attrs []dis.SvrAttrl) {
 			fmt.Sscanf(a.Value, "%d", &q.CloudMaxNodes)
 		case "cloud_idle_time":
 			fmt.Sscanf(a.Value, "%d", &q.CloudIdleTime)
+		case "cloud_provision_timeout":
+			fmt.Sscanf(a.Value, "%d", &q.CloudProvisionTimeout)
 		case "cloud_reclaim":
 			q.CloudReclaim = strings.ToLower(a.Value)
 		case "cloud_subnet_id":
@@ -4102,6 +4107,8 @@ func (s *Server) recoverQueues() {
 						fmt.Sscanf(val, "%d", &q.CloudMaxNodes)
 					case "cloud_idle_time":
 						fmt.Sscanf(val, "%d", &q.CloudIdleTime)
+					case "cloud_provision_timeout":
+						fmt.Sscanf(val, "%d", &q.CloudProvisionTimeout)
 					case "cloud_reclaim":
 						q.CloudReclaim = strings.ToLower(val)
 					case "cloud_subnet_id":
@@ -4445,6 +4452,9 @@ func (s *Server) saveQueue(q *queue.Queue) {
 	}
 	if q.CloudIdleTime > 0 {
 		sb.WriteString(fmt.Sprintf("cloud_idle_time=%d\n", q.CloudIdleTime))
+	}
+	if q.CloudProvisionTimeout > 0 {
+		sb.WriteString(fmt.Sprintf("cloud_provision_timeout=%d\n", q.CloudProvisionTimeout))
 	}
 	if q.CloudReclaim != "" {
 		sb.WriteString("cloud_reclaim=" + q.CloudReclaim + "\n")

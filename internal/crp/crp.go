@@ -50,6 +50,7 @@ type EnsureRequest struct {
 	MinNodes    int    // queue.cloud_min_nodes
 	MaxNodes    int    // queue.cloud_max_nodes
 	ServerAddr  string // pbs_server address (IP:port) used by cloud-init bootstrap
+	Hibernate   bool   // enable Azure hibernation on the VM (requires supported SKU/OS)
 }
 
 // VMRef uniquely identifies a VM.

@@ -28,6 +28,8 @@ type JobInfo struct {
 	Walltime  time.Duration
 	MemReq    int64 // requested memory in KB
 	CPUReq    int   // requested CPUs
+	Host      string // -l host=<node> pinning (empty = anywhere)
+	Features  []string // -l feature=<list> required node properties
 
 	// Scheduling state
 	CanNotRun    bool
@@ -45,6 +47,7 @@ type NodeInfo struct {
 	AvailMem  int64 // KB
 	LoadAvg   float64
 	Jobs      []string
+	Properties []string // node properties/features used for feature matching
 }
 
 // QueueInfo holds scheduling-relevant attributes for a queue.
@@ -67,6 +70,7 @@ type QueueInfo struct {
 	CloudMinNodes  int
 	CloudMaxNodes  int
 	CloudIdleTime  int    // seconds a free node waits before scale-in
+	CloudProvisionTimeout int // seconds a provisioned-but-not-booted VM may wait before reclaim (0 = default)
 	CloudReclaim   string
 	CloudSubnetID  string
 	CloudImageID   string
@@ -95,6 +99,7 @@ type CapacityEvent struct {
 	MinNodes int
 	MaxNodes int
 	IdleTime int
+	ProvisionTimeout int
 	Reclaim  string
 	// Full cloud definition (passed through to the CEC/CRP).
 	SubnetID string
@@ -113,6 +118,7 @@ type CycleResult struct {
 	CapacityEvents []CapacityEvent
 	FreeNodes      []string // names of nodes with available capacity after this cycle
 	IdleNodes      []string // names of nodes with no running jobs and free capacity (scale-in candidates)
+	QueuedByQueue  map[string][]string // per-cloud-queue, job IDs still queued after this cycle (catch qdel-during-provisioning)
 }
 
 // ServerInfo holds the complete server state snapshot for one scheduling cycle.
@@ -228,6 +234,7 @@ func (s *Scheduler) runCycle(conn *client.Conn, limited bool) (*CycleResult, err
 						MinNodes:  q.CloudMinNodes,
 						MaxNodes:  q.CloudMaxNodes,
 						IdleTime:  q.CloudIdleTime,
+						ProvisionTimeout: q.CloudProvisionTimeout,
 						Reclaim:   q.CloudReclaim,
 						SubnetID:  q.CloudSubnetID,
 						ImageID:   q.CloudImageID,
@@ -308,6 +315,20 @@ func (s *Scheduler) runCycle(conn *client.Conn, limited bool) (*CycleResult, err
 	}
 
 	res.Dispatched = dispatched
+
+	// Capture which jobs remain queued per cloud-backed queue after this cycle.
+	// Only state "Q" jobs are present in q.Jobs; if a VM is being provisioned for
+	// a bound job ID that no longer appears here, the job was deleted (qdel) or
+	// started elsewhere, so the CEC can release that still-booting VM.
+	res.QueuedByQueue = make(map[string][]string)
+	for _, q := range sinfo.Queues {
+		if !q.CloudBacked {
+			continue
+		}
+		for _, j := range q.Jobs {
+			res.QueuedByQueue[q.Name] = append(res.QueuedByQueue[q.Name], j.ID)
+		}
+	}
 
 	// Record nodes with available capacity so the CEC can tell when a
 	// previously-provisioned VM's node has registered (cloud elasticity).
@@ -606,6 +627,14 @@ func (s *Scheduler) findNodeForJob(sinfo *ServerInfo, jinfo *JobInfo) *NodeInfo 
 		if n.State != "free" && !strings.Contains(n.State, "job-") {
 			continue
 		}
+		// Host pinning: -l host=<node> restricts scheduling to that node.
+		if jinfo.Host != "" && !strings.EqualFold(n.Name, jinfo.Host) {
+			continue
+		}
+		// Feature matching: -l feature=a,b requires the node to carry all requested properties.
+		if len(jinfo.Features) > 0 && !nodeHasAllFeatures(n, jinfo.Features) {
+			continue
+		}
 		if n.FreeCPUs >= cpuReq {
 			candidates = append(candidates, n)
 		}
@@ -628,6 +657,23 @@ func (s *Scheduler) findNodeForJob(sinfo *ServerInfo, jinfo *JobInfo) *NodeInfo 
 	}
 
 	return candidates[0]
+}
+
+// nodeHasAllFeatures reports whether node n carries every property in want.
+func nodeHasAllFeatures(n *NodeInfo, want []string) bool {
+	for _, f := range want {
+		found := false
+		for _, p := range n.Properties {
+			if strings.EqualFold(p, f) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // --- Parsing helpers ---
@@ -664,9 +710,16 @@ func parseJobInfo(obj client.StatusObject) *JobInfo {
 		case "Resource_List.ncpus":
 			j.CPUReq, _ = strconv.Atoi(a.Value)
 		case "Resource_List.nodes":
-			// Parse "nodes=N" to get CPU count approximation
 			if n, err := strconv.Atoi(a.Value); err == nil && n > 0 {
 				j.CPUReq = n
+			}
+		case "Resource_List.host":
+			j.Host = a.Value
+		case "Resource_List.feature", "Resource_List.features", "Resource_List.properties":
+			for _, f := range strings.Split(a.Value, ",") {
+				if f = strings.TrimSpace(f); f != "" {
+					j.Features = append(j.Features, f)
+				}
 			}
 		}
 	}
@@ -699,6 +752,12 @@ func parseNodeInfo(obj client.StatusObject) *NodeInfo {
 				n.FreeCPUs = n.NumProcs - len(n.Jobs)
 				if n.FreeCPUs < 0 {
 					n.FreeCPUs = 0
+				}
+			}
+		case "properties", "features":
+			for _, p := range strings.Split(a.Value, ",") {
+				if p = strings.TrimSpace(p); p != "" {
+					n.Properties = append(n.Properties, p)
 				}
 			}
 		}
@@ -737,6 +796,8 @@ func parseQueueInfo(obj client.StatusObject) *QueueInfo {
 			q.CloudMaxNodes, _ = strconv.Atoi(a.Value)
 		case "cloud_idle_time":
 			q.CloudIdleTime, _ = strconv.Atoi(a.Value)
+		case "cloud_provision_timeout":
+			q.CloudProvisionTimeout, _ = strconv.Atoi(a.Value)
 		case "cloud_reclaim":
 			q.CloudReclaim = a.Value
 		case "cloud_subnet_id":

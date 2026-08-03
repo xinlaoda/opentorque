@@ -60,10 +60,11 @@ type Queue struct {
 	CloudProvider  string // cloud name: "azure" | "aws" | "" (static pool)
 	CloudVMSKU     string // VM size/family, e.g. "Standard_D8s_v3"
 	CloudMinNodes  int    // floor: nodes kept scaled-in
-	CloudMaxNodes  int    // cap: max nodes the queue may scale to (0 = unlimited)
-	CloudIdleTime  int    // seconds idle before a node becomes a scale-in candidate
-	CloudReclaim   string // "deallocate" | "hibernate"
-	CloudSubnetID  string // Azure subnet resource ID where worker VMs are placed
+	CloudMaxNodes        int    // cap: max nodes the queue may scale to (0 = unlimited)
+	CloudIdleTime        int    // seconds idle before a node becomes a scale-in candidate
+	CloudProvisionTimeout int    // seconds a provisioned-but-not-booted VM may wait before reclaim (0 = default)
+	CloudReclaim         string // deallocate | hibernate
+	CloudSubnetID    string // Azure subnet resource ID where worker VMs are placed
 	CloudImageID   string // OS image: id, urn, or shared-image-gallery reference
 	CloudDiskSize  int    // OS disk size in GB (0 = provider default)
 	CloudDiskType  string // OS disk type, e.g. "Premium_LRS" (optional)

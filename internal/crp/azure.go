@@ -311,10 +311,17 @@ func (a *AzureCRP) createVM(req EnsureRequest, vmName, nicID string) (string, er
 		osDisk["managedDisk"] = map[string]string{"storageAccountType": req.DiskType}
 	}
 
+	hardwareProfile := map[string]any{"vmSize": req.SKU}
+	if req.Hibernate {
+		// hibernationEnabled must be set at VM creation; Azure then auto-
+		// hibernates on deallocate for supported SKUs/OS images.
+		hardwareProfile["hibernationEnabled"] = true
+	}
+
 	body := map[string]any{
 		"location": req.Location,
 		"properties": map[string]any{
-			"hardwareProfile": map[string]string{"vmSize": req.SKU},
+			"hardwareProfile": hardwareProfile,
 			"osProfile": map[string]any{
 				"computerName":  computerName,
 				"adminUsername": "azureuser",

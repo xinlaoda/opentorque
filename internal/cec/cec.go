@@ -39,6 +39,7 @@ type Event struct {
 	MinNodes  int
 	MaxNodes  int
 	IdleTime  time.Duration
+	ProvisionTimeout time.Duration // seconds a provisioned-but-not-booted VM may wait before reclaim (0 = default)
 	Reclaim   string
 	// Full cloud definition (forwarded to the CRP).
 	SubnetID string
@@ -87,6 +88,8 @@ type Pool struct {
 	Running int               // VMs currently up/being tracked
 	Inflight int              // VMs being provisioned (Ensured, not yet up)
 	Provisioning map[string]string // vmID -> jobID bound during boot
+	ProvisionTimeout time.Duration // how long a still-booting VM may wait before reclaim (0 = default 10m)
+	ProvisionedAt map[string]time.Time // vmID -> when it entered Provisioning (for timeout sweep)
 
 	// Owned tracks dynamic nodes this pool created and currently manages
 	// (keyed by node name == VM name/id). A node stays Owned from the moment
@@ -176,6 +179,7 @@ func (c *Controller) ensurePool(ev Event) *Pool {
 			RGName:        ev.RGName,
 			ServerAddr:    ev.ServerAddr,
 			Provisioning:  make(map[string]string),
+			ProvisionedAt: make(map[string]time.Time),
 			Owned:         make(map[string]bool),
 			IdleSince:     make(map[string]time.Time),
 		}
@@ -193,6 +197,9 @@ func (c *Controller) ensurePool(ev Event) *Pool {
 	}
 	if ev.IdleTime > 0 {
 		p.IdleTime = ev.IdleTime
+	}
+	if ev.ProvisionTimeout > 0 {
+		p.ProvisionTimeout = ev.ProvisionTimeout
 	}
 	if ev.Reclaim != "" {
 		p.Reclaim = ev.Reclaim
@@ -228,6 +235,7 @@ func (c *Controller) reclaimIdle() {
 	defer c.mu.Unlock()
 	now := time.Now()
 	for qname, p := range c.pools {
+		c.sweepProvisioningTimeoutLocked(qname, p, now)
 		if p.IdleTime <= 0 {
 			continue
 		}
@@ -354,6 +362,7 @@ func (c *Controller) handleCapacity(ev Event) {
 		MinNodes:      p.MinNodes,
 		MaxNodes:      p.MaxNodes,
 		ServerAddr:    p.ServerAddr,
+		Hibernate:     p.Reclaim == "hibernate",
 	})
 	if err != nil {
 		log.Printf("[CEC] queue=%s provider Ensure error: %v", ev.Queue, err)
@@ -366,6 +375,7 @@ func (c *Controller) handleCapacity(ev Event) {
 			jobID = ev.Jobs[i].ID
 		}
 		p.Provisioning[vm.ID] = jobID
+		p.ProvisionedAt[vm.ID] = time.Now()
 		log.Printf("[CEC] queue=%s bound vm=%s -> job=%s (sku=%s)", ev.Queue, vm.ID, jobIDOr(jobID, "(unbound)"), ev.SKU)
 	}
 	p.Inflight += len(vms)
@@ -460,6 +470,81 @@ func (c *Controller) RegisterNodesIdle(queue string, idleNodes []string) {
 				log.Printf("[CEC] queue=%s node %s busy; idle timer cleared", queue, name)
 			}
 		}
+	}
+}
+
+// SyncQueuedJobs reconciles the jobs still queued in a cloud queue against
+// the VMs currently being provisioned. Any provisioning VM bound to a job ID
+// that is no longer queued means the job was deleted (qdel) or started
+// elsewhere while the VM was still booting; we destroy the orphaned VM to
+// avoid leaking cloud cost. Safe to call every cycle with the queue's current
+// queued job IDs and the same VM set. Unbound provisioning VMs (no jobID) are
+// left alone here; they are handled by the provisioning-timeout sweep.
+func (c *Controller) SyncQueuedJobs(queue string, jobIDs []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	p, ok := c.pools[queue]
+	if !ok {
+		return
+	}
+	stillQueued := make(map[string]bool, len(jobIDs))
+	for _, id := range jobIDs {
+		stillQueued[id] = true
+	}
+	var stale []string
+	for vmID, jobID := range p.Provisioning {
+		if jobID == "" {
+			continue // unbound; timeout sweep handles it
+		}
+		if !stillQueued[jobID] {
+			stale = append(stale, vmID)
+		}
+	}
+	for _, vmID := range stale {
+		log.Printf("[CEC] queue=%s provisioning vm=%s bound to job no longer queued (qdel/started elsewhere); destroying orphaned VM", queue, vmID)
+		if err := c.provider.Reclaim(crp.VMRef{Provider: p.Provider, VMID: vmID}, "deallocate", true); err != nil {
+			log.Printf("[CEC] queue=%s destroy orphaned provisioning vm=%s failed: %v", queue, vmID, err)
+			continue
+		}
+		delete(p.Provisioning, vmID)
+		delete(p.ProvisionedAt, vmID)
+		if p.Inflight > 0 {
+			p.Inflight--
+		}
+		log.Printf("[CEC] queue=%s destroyed orphaned provisioning vm=%s, inflight=%d", queue, vmID, p.Inflight)
+	}
+}
+
+// sweepProvisioningTimeoutLocked reclaims provisioning VMs that have been
+// booting for longer than the pool's ProvisionTimeout (default 10m if 0). It
+// runs on the reclaim ticker and only touches VMs still in Provisioning. Called
+// with the controller lock held.
+func (c *Controller) sweepProvisioningTimeoutLocked(qname string, p *Pool, now time.Time) {
+	if len(p.ProvisionedAt) == 0 {
+		return
+	}
+	timeout := p.ProvisionTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Minute
+	}
+	var stale []string
+	for vmID, since := range p.ProvisionedAt {
+		if now.Sub(since) >= timeout {
+			stale = append(stale, vmID)
+		}
+	}
+	for _, vmID := range stale {
+		log.Printf("[CEC] queue=%s provisioning vm=%s exceeded provisioning timeout (%s); destroying", qname, vmID, timeout)
+		if err := c.provider.Reclaim(crp.VMRef{Provider: p.Provider, VMID: vmID}, "deallocate", true); err != nil {
+			log.Printf("[CEC] queue=%s destroy timed-out provisioning vm=%s failed: %v", qname, vmID, err)
+			continue
+		}
+		delete(p.Provisioning, vmID)
+		delete(p.ProvisionedAt, vmID)
+		if p.Inflight > 0 {
+			p.Inflight--
+		}
+		log.Printf("[CEC] queue=%s destroyed timed-out provisioning vm=%s, inflight=%d", qname, vmID, p.Inflight)
 	}
 }
 

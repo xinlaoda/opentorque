@@ -237,6 +237,7 @@ func runOneCycle(sched *scheduler.Scheduler, cfg *config.Config, limited bool, c
 			MinNodes: ce.MinNodes,
 			MaxNodes: ce.MaxNodes,
 			IdleTime: time.Duration(ce.IdleTime) * time.Second,
+			ProvisionTimeout: time.Duration(ce.ProvisionTimeout) * time.Second,
 			Reclaim:  ce.Reclaim,
 			SubnetID: ce.SubnetID,
 			ImageID:  ce.ImageID,
@@ -267,6 +268,7 @@ func runOneCycle(sched *scheduler.Scheduler, cfg *config.Config, limited bool, c
 	for _, q := range ct.queues() {
 		ct.ctrl.RegisterNodesUp(q, res.FreeNodes)
 		ct.ctrl.RegisterNodesIdle(q, res.IdleNodes)
+		ct.ctrl.SyncQueuedJobs(q, res.QueuedByQueue[q])
 	}
 }
 

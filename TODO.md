@@ -16,24 +16,27 @@ Legend:
 
 ## 1. Node selection & node groups
 
-### 1.1 `-l host=<node>` — pin a job to a specific node  [GAP]
-A job cannot request a particular node. `qsub -l host=nodeX` is silently
-ignored: on a live cluster, a job requesting a non-existent host (`-l
-host=nonexistent-host`) ran immediately on the available node.
-- Where: `internal/sched/scheduler/scheduler.go` (`parseJobInfo`,
-  `findNodeForJob`); `internal/server/server.go` (`handleQueueJob`).
-- Expected: parse `Resource_List.host`, store it on the job, and have
-  `findNodeForJob` only consider nodes whose name matches.
+### 1.1 `-l host=<node>` — pin a job to a specific node  [DONE — implemented & tested]
+Implemented in `internal/sched/scheduler/scheduler.go`: `parseJobInfo` reads
+`Resource_List.host` into a new `JobInfo.Host`, and `findNodeForJob` filters
+candidates by `strings.EqualFold(n.Name, jinfo.Host)`.
+- Live test (2026-08-03, external scheduler): `qsub -l host=xxin-opentorque-srv
+  ncpus=1` dispatched to `xxin-opentorque-srv/0` and reached state `R`;
+  `qsub -l host=xxin-opentorque-nonexistent ncpus=1` stayed `Q` (no such
+  node, never dispatched). A `-l host=xxin-opentorque-w1` job was dispatched
+  only to `w1` per the sched log (w1's MOM could not exec it due to a separate
+  workdir/shell environment issue, not a scheduling problem).
 
-### 1.2 `-l feature=<prop>` / node `properties` — schedule by node property  [STUB]
-`Node` has a `Properties []string` field (settable via `qmgr set node ...
-properties=...`, shown by `pbsnodes`), but the scheduler **never reads it**.
-`qsub -l feature=special` is ignored even when no node has that property.
-The only code touching `Properties` is `formatNodeStatus` (output) and
-`mgrSetNode` (parse). 
-- Where: `internal/sched/scheduler/scheduler.go` (`parseJobInfo`,
-  `findNodeForJob`); `internal/node/node.go` (data model exists).
-- Expected: match job `-l feature=/properties=` against node `Properties`.
+### 1.2 `-l feature=<prop>` / node `properties` — schedule by node property  [DONE — implemented & tested]
+Implemented in `internal/sched/scheduler/scheduler.go`: `parseNodeInfo` now
+populates `NodeInfo.Properties` from the node `properties`/`features` status
+attrs, `parseJobInfo` reads `-l feature/features/properties` into
+`JobInfo.Features`, and `findNodeForJob` requires `nodeHasAllFeatures`
+(case-insensitive subset match). Properties are settable via
+`qmgr set node <name> properties=a,b` and shown by `pbsnodes`.
+- Live test (2026-08-03): with `properties=gpu` on `xxin-opentorque-srv`,
+  `qsub -l feature=gpu ncpus=1` dispatched to `xxin-opentorque-srv/0` and
+  reached `R`; `qsub -l feature=missing ncpus=1` stayed `Q` (no node has it).
 
 ### 1.3 Host groups / host tags / node pools  [GAP]
 No notion of grouping nodes (equivalent of PBS `hostgroup`, host tags, or node
