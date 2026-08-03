@@ -435,6 +435,6 @@ CEC observe NodeFree (no new job on it) for cloud_idle_time ──> NodeIdle ─
 - **M2 (Azure CRP + bootstrap)**: Azure driver (VMSS or single VMs) + cloud-init
   that installs `pbs_mom` and registers; dynamic node add/remove (§7 of prior doc).
 - **M3 (scale-in + hibernate)**: `NodeFree`→idle→drain→reclaim; `hibernate` fast
-  resume.
-- **M4 (refine)**: cooldown tuning, headroom factor, `NeedCapacity` merging,
-  drain timeout policies, HA.
+  resume. **[DONE -- implemented & integration-tested, 2026-08]**
+  `deallocate` live-verified; `hibernate` fast-resume + provisioning-timeout
+  remain stubs (see TODO.md 4.4c).

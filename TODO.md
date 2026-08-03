@@ -419,11 +419,9 @@ end-to-end against live Azure** (subscription `a04b47d2-...`). Key results:
   the node; Go reports a misleading no-such-file error when a bad `cmd.Dir` is
   combined with `Setsid: true`. Fix: validate each candidate (`PBS_O_WORKDIR`,
   `HOME`, `os.Getenv`) with `os.Stat` and fall back to `/`.
-- **M3 (scale-in) remains the open gap:** scheduler only emits `EventCapacity`;
-  `EventNodeFree`/`EventNodeIdle`/`EventNodeDown` are defined but never emitted,
-  and `handleNodeIdle` only logs/stubs (does not call the CRP to
-  deallocate/destroy). So `cloud_idle_time`/`cloud_reclaim` do not yet reclaim
-  VMs. See M3 bullet below.
+- **M3 (scale-in) is now IMPLEMENTED & verified live** (commits ``7fe7cea`` +
+  ``69a3723``): CEC drains, deregisters and reclaims idle cloud VMs. See 4.4c below.
+
 
 
 - **M2** — Azure CRP driver + cloud-init bootstrap (install `pbs_mom`, point at
@@ -437,7 +435,35 @@ end-to-end against live Azure** (subscription `a04b47d2-...`). Key results:
 
 - **M3** — event-driven scale-in: observe `NodeFree` → idle window →
   drain → deregister → `deallocate`/`hibernate`; fast `resume` for hibernate;
-  provisioning timeout + `qdel`-during-provisioning cleanup (§12.2).
+  provisioning timeout + `qdel`-during-provisioning cleanup (§12.2). **[DONE -- implemented & integration-tested]** -- see 4.4c below. (hibernate/resume fast path + provisioning timeout remain stubs; only deallocate exercised live.)
+
+### 4.4c M3 scale-in implementation + live test results (RG xxin-opentorque-test, westus3)
+M3 event-driven scale-in is now implemented and verified end-to-end (commits
+7fe7cea + 69a3723) in external-scheduler mode. Scale-out, job execution on the
+dynamic VM, then idle-time-based drain/deregister/deallocate all ran live:
+- Code: internal/cec/cec.go gained Owned map[string]bool + per-node
+  IdleSince timers and a reclaimInterval ticker (default 3s); a NodeController
+  interface (DrainNode, DeregisterNode) injected from cmd/pbs_sched/main.go
+  keeps CEC decoupled from the server CLI. RegisterNodesUp seeds Owned when
+  consuming provisioning; RegisterNodesIdle(queue, idleNodes) starts/clears idle
+  timers (static/foreign nodes ignored).
+- Scale-out + run: submitted 5 -l ncpus=2 (180s sleep) jobs; 4 filled the static
+  slots (w1/srv), the 5th (job 39) queued -> capacity event -> CEC created
+  ot-node-4hdZDYiK (Standard_D2s_v3) -> cloud-init booted mom -> auto-registered
+  -> job 39 dispatched and ran on it. Scheduler log: [SCHED] Dispatching job 39
+  ... to ot-node-4hdZDYiK/0.
+- Idle reclaim: after the job finished, [CEC] idle timer started, then after
+  cloud_idle_time seconds [CEC] reclaiming idle node ot-node-4hdZDYiK
+  (policy=deallocate, running=1 min=0). Drain via Manager set node state=offline
+  (server log cmd=3 objType=4 attrs=1), deregister via Manager delete node
+  (cmd=2, [NODE] Removed node), then provider.Reclaim -> VM confirmed
+  PowerState/deallocated, Running decremented to 0, node dropped from Owned.
+- Cleanup/state: test VM deallocated and deleted; orphaned M2 VM removed;
+  cloud_idle_time restored to 300. Final node list: w1, srv only.
+- Remaining stubs: cloud_reclaim=hibernate fast-resume and provisioning-timeout
+  (qdel-during-provisioning) cleanup are not yet exercised; only deallocate is
+  live-verified.
+
 - **M4** — cooldown tuning, shortfall headroom, `NeedCapacity` merge/coalesce,
   drain timeout policy, surface per-pool free-cores via a status RPC (extends
   the `qstat -B` gap in 2.9).
