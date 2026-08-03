@@ -1058,9 +1058,10 @@ func (s *Server) handleRunJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestHead
 			return true
 		}
 
-		// Reserve slot on specified node and dispatch
+		// Reserve slots on the specified node and dispatch (consume the job's
+		// actual requested CPUs so capacity is accounted per CPUReq — TODO 2.6)
 		n.Mu.Lock()
-		n.AssignJob(j.ID, 1)
+		n.AssignJob(j.ID, jobRequestedCPUs(j))
 		execHost := fmt.Sprintf("%s/0", n.Name)
 		momPort := n.MomPort
 		n.Mu.Unlock()
@@ -1332,12 +1333,12 @@ func (s *Server) handleRerunJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestHe
 		return true
 	}
 
-	// Release node resources if job was running
+	// Release node resources if job was running (free the job's actual CPU slots)
 	if oldState == job.StateRunning && j.ExecHost != "" {
 		nodeName := strings.Split(j.ExecHost, "/")[0]
 		if n := s.nodeMgr.GetNode(nodeName); n != nil {
 			n.Mu.Lock()
-			n.ReleaseJob(j.ID, 1)
+			n.ReleaseJob(j.ID, jobRequestedCPUs(j))
 			n.Mu.Unlock()
 		}
 	}
@@ -2341,6 +2342,19 @@ func (s *Server) formatNodeStatus(n *node.Node) dis.StatusObject {
 	// List jobs on this node
 	if len(n.AssignedJobs) > 0 {
 		add("jobs", strings.Join(n.AssignedJobs, ", "))
+		// Report the node's used CPU as the sum of the requested ncpus of every
+		// job assigned to it, so the external scheduler can account capacity by
+		// per-job CPUReq instead of by job count (see TODO 2.6). A job without an
+		// explicit ncpus counts as 1.
+		used := 0
+		for _, jid := range n.AssignedJobs {
+			if j := s.jobMgr.GetJob(jid); j != nil {
+				used += jobRequestedCPUs(j)
+			} else {
+				used++
+			}
+		}
+		add("used_cpus", strconv.Itoa(used))
 	}
 
 	if len(n.Properties) > 0 {
@@ -2351,6 +2365,20 @@ func (s *Server) formatNodeStatus(n *node.Node) dis.StatusObject {
 	}
 
 	return dis.StatusObject{Type: dis.MgrObjNode, Name: n.Name, Attrs: attrs}
+}
+
+// jobRequestedCPUs returns the CPUs a job requested via Resource_List.ncpus
+// (defaulting to 1 when unset or unparseable). Used to compute per-node used
+// CPU for accurate capacity accounting (see TODO 2.6 and formatNodeStatus).
+func jobRequestedCPUs(j *job.Job) int {
+	j.Mu.RLock()
+	defer j.Mu.RUnlock()
+	if v, ok := j.ResourceReq["ncpus"]; ok {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 1
 }
 
 // formatServerStatus builds a StatusObject for the server itself.
@@ -3226,8 +3254,10 @@ func (s *Server) scheduleJob(j *job.Job) bool {
 		return false // Limits exceeded, try again next cycle
 	}
 
-	// Find a node with available slots
-	neededSlots := 1
+	// Find a node with enough free CPU slots for this job. Consume the job's
+	// actual requested CPUs (default 1) so node capacity is accounted per
+	// CPUReq instead of per job (see TODO 2.6).
+	neededSlots := jobRequestedCPUs(j)
 	n, slots := s.nodeMgr.FindNodeForJob(neededSlots)
 	if n == nil {
 		return false // No free nodes, try again next cycle
@@ -3516,7 +3546,7 @@ func (s *Server) undoJobDispatch(j *job.Job, n *node.Node) {
 	j.Mu.Unlock()
 
 	n.Mu.Lock()
-	n.ReleaseJob(jobID, 1)
+	n.ReleaseJob(jobID, jobRequestedCPUs(j))
 	n.Mu.Unlock()
 
 	if q := s.queueMgr.GetQueue(queueName); q != nil {
@@ -3528,13 +3558,20 @@ func (s *Server) undoJobDispatch(j *job.Job, n *node.Node) {
 
 // releaseNodeResources frees node slots when a job completes.
 func (s *Server) releaseNodeResources(execHost, jobID string) {
+	// Free the job's actual requested CPUs so capacity is released symmetrically
+	// with what AssignJob consumed at dispatch (see TODO 2.6). If the job is no
+	// longer in the manager it contributes a single slot as a safe default.
+	slots := 1
+	if j := s.jobMgr.GetJob(jobID); j != nil {
+		slots = jobRequestedCPUs(j)
+	}
 	// Parse exec_host format: "nodename/slot+nodename/slot"
 	parts := strings.Split(execHost, "+")
 	for _, part := range parts {
 		nodeName := strings.Split(part, "/")[0]
 		if n := s.nodeMgr.GetNode(nodeName); n != nil {
 			n.Mu.Lock()
-			n.ReleaseJob(jobID, 1)
+			n.ReleaseJob(jobID, slots)
 			n.Mu.Unlock()
 		}
 	}

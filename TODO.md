@@ -117,10 +117,24 @@ The 15001 came from `handleRunJob` being unable to resolve a **short** job ID vi
   and the job transitioned `Q -> R` on `srv/0`. The 15001 is gone; a job that is
   already running now correctly returns `15004` (not 15001).
 
-### 2.6 Node CPU-accounting strength  [GAP]
-Node selection uses `FreeCPUs = NumProcs - len(node.Jobs)` (one count per job),
-not a per-job `CPUReq` aggregate, so CPU-based packing is weak and jobs
-effectively dispatch in parallel regardless of `-l ncpus`. See 1.4.
+### 2.6 Node CPU-accounting strength  [DONE — fixed & live-tested]
+Capacity is now accounted per-job `CPUReq`, not per-job-count, on **both**
+scheduling paths:
+- **External `pbs_sched`** (`internal/sched/scheduler/scheduler.go`): the server
+  now reports a node's `used_cpus` (sum of the requested `ncpus` of every job on
+  the node, via `formatNodeStatus`), and `parseNodeInfo` computes
+  `FreeCPUs = NumProcs - used_cpus` (falling back to `NumProcs - len(jobs)` only
+  when the server did not report `used_cpus`). `findNodeForJob` then places jobs
+  only on nodes with enough real free CPUs.
+- **Built-in scheduler** (`internal/server/server.go`): `scheduleJob` now calls
+  `FindNodeForJob(jobRequestedCPUs(j))` instead of hardcoding 1 slot, and every
+  `AssignJob`/`ReleaseJob` in `handleRunJob`, `handleRerunJob`,
+  `undoJobDispatch`, and `releaseNodeResources` uses the job's requested CPUs so
+  slots are consumed/freed symmetrically.
+- Live test (2026-08-03, RG `xxin-opentorque-test`, external scheduler): an
+  `-l ncpus=4` job (no node has 4 of the 2-CPU nodes' capacity) stayed **Q**,
+  while two `-l ncpus=1` jobs ran **R**; node status showed `used_cpus = 2` on
+  the full node. Previously every job ran immediately regardless of `-l ncpus`.
 
 ### 2.7 Fair-share accounts / projects / QoS  [GAP]
 Only a minimal per-user `fairUsage` map exists. No accounts, projects, or QoS

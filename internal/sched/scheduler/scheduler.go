@@ -47,6 +47,7 @@ type NodeInfo struct {
 	AvailMem  int64 // KB
 	LoadAvg   float64
 	Jobs      []string
+	UsedCPUs  int    // CPUs currently consumed by running jobs (from node used_cpus)
 	Properties []string // node properties/features used for feature matching
 }
 
@@ -728,6 +729,7 @@ func parseJobInfo(obj client.StatusObject) *JobInfo {
 
 func parseNodeInfo(obj client.StatusObject) *NodeInfo {
 	n := &NodeInfo{Name: obj.Name}
+	usedReported := false
 	for _, a := range obj.Attrs {
 		switch a.Name {
 		case "state":
@@ -740,6 +742,11 @@ func parseNodeInfo(obj client.StatusObject) *NodeInfo {
 				n.NumProcs, _ = strconv.Atoi(a.Value)
 				n.FreeCPUs = n.NumProcs
 			}
+		case "used_cpus":
+			if u, err := strconv.Atoi(a.Value); err == nil && u >= 0 {
+				n.UsedCPUs = u
+				usedReported = true
+			}
 		case "totmem":
 			n.TotalMem = parseMemory(a.Value)
 		case "availmem":
@@ -749,9 +756,15 @@ func parseNodeInfo(obj client.StatusObject) *NodeInfo {
 		case "jobs":
 			if a.Value != "" {
 				n.Jobs = strings.Split(a.Value, ",")
-				n.FreeCPUs = n.NumProcs - len(n.Jobs)
-				if n.FreeCPUs < 0 {
-					n.FreeCPUs = 0
+				// Fallback only when the server did not report used_cpus (see
+				// TODO 2.6): derive free CPUs from the running-job count. When
+				// used_cpus is present it gives the authoritative per-job CPUReq
+				// sum, so it is preferred.
+				if !usedReported {
+					n.FreeCPUs = n.NumProcs - len(n.Jobs)
+					if n.FreeCPUs < 0 {
+						n.FreeCPUs = 0
+					}
 				}
 			}
 		case "properties", "features":
@@ -760,6 +773,14 @@ func parseNodeInfo(obj client.StatusObject) *NodeInfo {
 					n.Properties = append(n.Properties, p)
 				}
 			}
+		}
+	}
+	// If the server reported used_cpus (authoritative per-job CPUReq sum), use it
+	// to compute the true number of free CPUs regardless of attr order.
+	if usedReported {
+		n.FreeCPUs = n.NumProcs - n.UsedCPUs
+		if n.FreeCPUs < 0 {
+			n.FreeCPUs = 0
 		}
 	}
 	return n
