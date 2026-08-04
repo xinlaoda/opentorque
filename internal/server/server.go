@@ -3639,8 +3639,60 @@ func (s *Server) checkNodes() {
 		if !isDown && time.Since(lastUpdate) > 5*time.Minute && !lastUpdate.IsZero() {
 			log.Printf("[SERVER] Node %s appears down (no update for %v)", name, time.Since(lastUpdate))
 			s.nodeMgr.MarkNodeDown(name)
+			// Requeue any jobs running on the dead node so they are not left
+			// orphaned in state R (TODO 2.10).
+			s.requeueNodeJobs(name)
 		}
 	}
+}
+
+// requeueNodeJobs requeues all running jobs assigned to a node that has gone
+// down, freeing their CPU slots so the scheduler can re-dispatch them onto a
+// healthy node. Honors disable_automatic_requeue (TODO 2.10).
+func (s *Server) requeueNodeJobs(nodeName string) {
+	if s.cfg.DisableAutoRequeue {
+		log.Printf("[SERVER] Node %s down but auto-requeue disabled; leaving its jobs in place", nodeName)
+		return
+	}
+
+	n := s.nodeMgr.GetNode(nodeName)
+	if n == nil {
+		return
+	}
+	n.Mu.Lock()
+	jobs := append([]string(nil), n.AssignedJobs...)
+	n.Mu.Unlock()
+
+	for _, jid := range jobs {
+		j := s.jobMgr.GetJob(jid)
+		if j == nil {
+			continue
+		}
+		j.Mu.Lock()
+		if j.State != job.StateRunning {
+			j.Mu.Unlock()
+			continue
+		}
+		oldState := j.State
+		queueName := j.Queue
+
+		// Free the CPU slots this job consumed on the (dead) node.
+		n.Mu.Lock()
+		n.ReleaseJob(j.ID, jobRequestedCPUs(j))
+		n.Mu.Unlock()
+
+		j.ExecHost = ""
+		j.ExecPort = 0
+		j.SetState(job.StateQueued, job.SubstateQueued)
+		j.Mu.Unlock()
+
+		if q := s.queueMgr.GetQueue(queueName); q != nil {
+			q.TransferJobState(oldState, job.StateQueued)
+		}
+		s.saveJob(j)
+		log.Printf("[SERVER] Node %s down: auto-requeued job %s", nodeName, jid)
+	}
+	s.triggerSched()
 }
 
 // completedJobCleanup periodically removes old completed jobs.

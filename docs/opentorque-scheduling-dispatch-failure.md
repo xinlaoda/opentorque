@@ -244,15 +244,23 @@ changes state, so end-to-end latency is at least one full tick and frequently
 event/trigger socket (external) mirroring `SCH_SCHEDULE_NEW` / `SCH_SCHEDULE_TERM`
 from the reference design, plus an on-submit and on-complete dispatch attempt.
 
-### 6.2 Node-down does NOT auto-requeue its running jobs — [GAP/BUG]
-`nodeMgr.MarkNodeDown` only flips the node to `StateDown` and increments a fail
-count. It does **not** requeue or fail the jobs that were running on that node.
-Consequences: if a MOM crashes or a node dies, jobs on it stay in `R` forever
-(orphaned) until an operator runs `qrerun`, and the scheduler simply stops
-placing new work on that node. `checkNodes` only marks it down after ~5 minutes
-of silence regardless of current state. Recommended: on node-down, mark its jobs
-as requeued (honoring `disable_automatic_requeue` / `automatic_requeue_exit_code`)
-and free the slots.
+### 6.2 Node-down does NOT auto-requeue its running jobs — [GAP/BUG → DONE]
+Originally `nodeMgr.MarkNodeDown` only flipped the node to `StateDown` and
+incremented a fail count. It did **not** requeue or fail the jobs that were
+running on that node: if a MOM crashed or a node died, jobs on it stayed in `R`
+forever (orphaned) until an operator ran `qrerun`, and the scheduler simply
+stopped placing new work on that node. `checkNodes` only marked it down after
+~5 minutes of silence regardless of current state.
+
+**Resolved (TODO 2.10):** `checkNodes` now calls `Server.requeueNodeJobs(name)`
+after marking a node down. That method requeues every job that was
+`StateRunning` on the node — freeing its CPU slots
+(`n.ReleaseJob(j.ID, jobRequestedCPUs(j))`), clearing `ExecHost`/`ExecPort`,
+setting the job back to `StateQueued` (with `TransferJobState(R → Q)` on its
+queue), persisting it, and triggering a scheduling pass so it can be
+re-dispatched onto a healthy node. Honors `disable_automatic_requeue`
+(`automatic_requeue_exit_code` is not consulted — that knob applies to a job's
+exit code at completion, which a dead node has no exit code for).
 
 ### 6.3 Existing docs describe the C reference, not this Go build — [DOC]
 `docs/pbs_sched_analysis.md` (§"Server → Scheduler Triggering") documents the

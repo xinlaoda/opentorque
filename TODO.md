@@ -212,14 +212,27 @@ and `sched_max_job_start`, respects `max_sched_time`). The periodic
   real channel/batch budgeting across concurrent trigger cycles at high submit
   rates; `qstat -B` does not yet surface the effective sched knobs (see §7.6).
 
-### 2.10 Node-down does not auto-requeue its running jobs  [GAP/BUG]
-`nodeMgr.MarkNodeDown` only sets `StateDown` and bumps `FailCount`; it does **not**
-requeue or fail the jobs running on that node. If a MOM crashes or a node dies,
-its jobs stay in `R` forever (orphaned) until an operator runs `qrerun`, and the
-scheduler just stops placing new work there. `checkNodes` marks it down after
-~5 min of silence regardless of state. Recommended: on node-down, requeue its
-jobs (honoring `disable_automatic_requeue` / `automatic_requeue_exit_code`) and
-free slots. See `docs/opentorque-scheduling-dispatch-failure.md` §6.2.
+### 2.10 Node-down does not auto-requeue its running jobs  [DONE — implemented]
+Previously `nodeMgr.MarkNodeDown` only set `StateDown` and bumped `FailCount`; it
+did **not** requeue or fail the jobs running on that node. If a MOM crashed or a
+node died, its jobs stayed in `R` forever (orphaned) until an operator ran
+`qrerun`, and the scheduler just stopped placing new work there. `checkNodes`
+marked it down after ~5 min of silence regardless of state. See
+`docs/opentorque-scheduling-dispatch-failure.md` §6.2.
+
+Implemented in `internal/server/server.go`:
+- `checkNodes` now calls a new `s.requeueNodeJobs(name)` right after marking a
+  node down.
+- `requeueNodeJobs` requeues every job that was `StateRunning` on the node:
+  frees the node's CPU slots (`n.ReleaseJob(j.ID, jobRequestedCPUs(j))`),
+  clears `ExecHost`/`ExecPort`, sets the job back to `StateQueued`
+  (`TransferJobState(R → Q)` on its queue), `saveJob`s it, and triggers a
+  scheduling pass so it can be re-dispatched onto a healthy node.
+- Honors `disable_automatic_requeue`: when set, the node-down requeue is skipped
+  and the jobs are left in place for manual `qrerun`.
+- `automatic_requeue_exit_code` is not consulted here: that knob decides requeue
+  based on a job's exit code at *completion*, a node that died is not a
+  completed job and has no exit code.
 
 ---
 
