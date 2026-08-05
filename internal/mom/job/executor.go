@@ -283,6 +283,7 @@ func (e *Executor) CleanupJob(j *Job) {
 	files := []string{
 		filepath.Join(e.jobsDir, j.ID+".SC"),
 		filepath.Join(e.jobsDir, j.ID+".JB"),
+		filepath.Join(e.jobsDir, j.ID+".SID"),
 		filepath.Join(e.spoolDir, j.ID+".OU"),
 		filepath.Join(e.spoolDir, j.ID+".ER"),
 	}
