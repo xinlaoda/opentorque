@@ -503,13 +503,20 @@ dynamic VM, then idle-time-based drain/deregister/deallocate all ran live:
 - Remaining stubs: cloud_reclaim=hibernate fast-resume and provisioning-timeout
   (qdel-during-provisioning) cleanup are not yet exercised; only deallocate is
   live-verified.
-- Destroy-path resource cleanup: when scale-in reclaims with destroy=true
-  (VM deleted rather than deallocated), provider.Reclaim now deletes the VM's
-  attached NICs and any public IPs too (commit 2b1375d). Azure does not
-  cascade-delete a VM's NICs, so this prevents orphaned network interfaces
-  accumulating in the resource group after scale-in. Verified live: 7 orphaned
-  ot-node-* NICs left by earlier scale-in tests were manually removed and none
-  remained after the fix.
+- Destroy-path resource cleanup (verified end-to-end live 2026-08-05): when
+  scale-in reclaims with destroy=true (VM deleted rather than deallocated),
+  provider.Reclaim now deletes the VM's attached NICs and any public IPs so
+  Azure does not leave orphaned network interfaces. Verified with a real
+  scale-out -> idle-reclaim(destroy) cycle: the dynamic VM `ot-node-lthCkGOx`
+  and its NIC were both removed, leaving no orphan. Two bugs were found and
+  fixed along the way: (1) destroyVM deleted the VM asynchronously then
+  deleted the NIC immediately, which returned HTTP 400 NicInUse and orphaned
+  the NIC -- destroyVM now waits for the VM to report 404 and retries NIC/PIP
+  deletion (commit 3888d55); (2) CEC SyncQueuedJobs destroyed a provisioning
+  VM whenever its bound job left the queue, including when the job was running
+  on that very VM -- it now only releases a provisioning VM when the bound job
+  is gone (queued nor running), via an AliveJobs set (commit 3888d55). Earlier
+  orphaned ot-node-* NICs in the test RG were manually cleaned up.
 
 - **M4** — cooldown tuning, shortfall headroom, `NeedCapacity` merge/coalesce,
   drain timeout policy, surface per-pool free-cores via a status RPC (extends
@@ -521,6 +528,14 @@ dynamic VM, then idle-time-based drain/deregister/deallocate all ran live:
 ---
 
 ## 5. High availability & robustness
+
+- MOM orphaned-process cleanup (fixed 2026-08-05): a crash/restart left a running
+  job's process group orphaned, and a re-dispatched job started a second instance
+  while the first (e.g. `sleep`) kept running and was never killed by `qdel`.
+  The MOM now persists each running job's session id to `mom_priv/jobs/<id>.SID`,
+  reaps any recorded session at startup (manager is empty then) and before
+  starting a new instance of the same job, and removes the sidecar on cleanup
+  (commits d5fe0ed + e7ef26a).
 
 ### 5.1 HA / failover  [GAP]
 Single `pbs_server`; no active/passive failover, no job migration, no server
