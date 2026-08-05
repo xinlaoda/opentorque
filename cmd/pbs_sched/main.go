@@ -268,7 +268,7 @@ func runOneCycle(sched *scheduler.Scheduler, cfg *config.Config, limited bool, c
 	for _, q := range ct.queues() {
 		ct.ctrl.RegisterNodesUp(q, res.FreeNodes)
 		ct.ctrl.RegisterNodesIdle(q, res.IdleNodes)
-		ct.ctrl.SyncQueuedJobs(q, res.QueuedByQueue[q])
+		ct.ctrl.SyncQueuedJobs(q, res.AliveJobs)
 	}
 }
 

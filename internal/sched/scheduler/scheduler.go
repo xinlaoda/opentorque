@@ -120,6 +120,10 @@ type CycleResult struct {
 	FreeNodes      []string // names of nodes with available capacity after this cycle
 	IdleNodes      []string // names of nodes with no running jobs and free capacity (scale-in candidates)
 	QueuedByQueue  map[string][]string // per-cloud-queue, job IDs still queued after this cycle (catch qdel-during-provisioning)
+	// AliveJobs is the set of job IDs that still exist in the server after this
+	// cycle (queued + running). The CEC uses it to avoid tearing down a
+	// provisioning VM whose bound job merely started running.
+	AliveJobs []string
 }
 
 // ServerInfo holds the complete server state snapshot for one scheduling cycle.
@@ -329,6 +333,23 @@ func (s *Scheduler) runCycle(conn *client.Conn, limited bool) (*CycleResult, err
 		for _, j := range q.Jobs {
 			res.QueuedByQueue[q.Name] = append(res.QueuedByQueue[q.Name], j.ID)
 		}
+	}
+
+	// Live job IDs (queued or running) so the CEC only releases a provisioning
+	// VM when its bound job has actually been deleted, not merely dispatched.
+	alive := make(map[string]bool)
+	for _, q := range sinfo.Queues {
+		for _, j := range q.Jobs {
+			alive[j.ID] = true
+		}
+	}
+	for _, n := range sinfo.Nodes {
+		for _, jid := range n.Jobs {
+			alive[jid] = true
+		}
+	}
+	for id := range alive {
+		res.AliveJobs = append(res.AliveJobs, id)
 	}
 
 	// Record nodes with available capacity so the CEC can tell when a

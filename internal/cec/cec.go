@@ -473,13 +473,13 @@ func (c *Controller) RegisterNodesIdle(queue string, idleNodes []string) {
 	}
 }
 
-// SyncQueuedJobs reconciles the jobs still queued in a cloud queue against
-// the VMs currently being provisioned. Any provisioning VM bound to a job ID
-// that is no longer queued means the job was deleted (qdel) or started
-// elsewhere while the VM was still booting; we destroy the orphaned VM to
-// avoid leaking cloud cost. Safe to call every cycle with the queue's current
-// queued job IDs and the same VM set. Unbound provisioning VMs (no jobID) are
-// left alone here; they are handled by the provisioning-timeout sweep.
+// SyncQueuedJobs reconciles the jobs still present in a cloud queue (queued
+// or running) against the VMs currently being provisioned. A provisioning VM
+// is destroyed only when its bound job ID no longer exists at all (qdel); a
+// job that merely started running -- including on this very VM while it was
+// still booting -- must not be torn down. Safe to call every cycle with the
+// current live job set. Unbound provisioning VMs (no jobID) are left alone
+// here; they are handled by the provisioning-timeout sweep.
 func (c *Controller) SyncQueuedJobs(queue string, jobIDs []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -487,16 +487,16 @@ func (c *Controller) SyncQueuedJobs(queue string, jobIDs []string) {
 	if !ok {
 		return
 	}
-	stillQueued := make(map[string]bool, len(jobIDs))
+	alive := make(map[string]bool, len(jobIDs))
 	for _, id := range jobIDs {
-		stillQueued[id] = true
+		alive[id] = true
 	}
 	var stale []string
 	for vmID, jobID := range p.Provisioning {
 		if jobID == "" {
 			continue // unbound; timeout sweep handles it
 		}
-		if !stillQueued[jobID] {
+		if !alive[jobID] {
 			stale = append(stale, vmID)
 		}
 	}

@@ -448,19 +448,57 @@ func (a *AzureCRP) destroyVM(rg, vmName string) error {
 		return err
 	}
 
-	// The VM is gone; delete its NICs and public IPs so no orphaned resources
-	// remain. A failure here is logged, not fatal — the VM is already removed.
+	// Azure deletes the VM asynchronously: until the VM is fully gone its NICs
+	// are still reported "in use", so deleting the NIC immediately fails with
+	// HTTP 400 NicInUse and orphans the interface. Wait for the VM to disappear
+	// before deleting its NICs/public IPs so no orphaned resources remain.
+	if err := a.waitVMGone(vmPath, 120*time.Second); err != nil {
+		log.Printf("[CRP] destroyVM: VM %s did not confirm deletion, continuing anyway: %v", vmName, err)
+	}
+
 	for _, nic := range nics {
-		if _, _, err := a.doAPI("DELETE", nic, nil); err != nil {
+		if err := a.deleteWithRetry(nic); err != nil {
 			log.Printf("[CRP] destroyVM: failed to delete NIC %s: %v", nic, err)
 		}
 	}
 	for _, pip := range pips {
-		if _, _, err := a.doAPI("DELETE", pip, nil); err != nil {
+		if err := a.deleteWithRetry(pip); err != nil {
 			log.Printf("[CRP] destroyVM: failed to delete PublicIP %s: %v", pip, err)
 		}
 	}
 	return nil
+}
+
+// waitVMGone polls the VM until it returns HTTP 404 (no longer exists), which
+// means its NICs have been detached and are deletable, or until timeout.
+func (a *AzureCRP) waitVMGone(vmPath string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		_, _, err := a.doAPI("GET", vmPath, nil)
+		if err != nil {
+			if strings.Contains(err.Error(), "HTTP 404") {
+				return nil
+			}
+			return err
+		}
+		time.Sleep(5 * time.Second)
+	}
+	return fmt.Errorf("VM still present after %s", timeout)
+}
+
+// deleteWithRetry deletes a resource, retrying with backoff. Azure can briefly
+// keep a NIC "in use" even after its VM is gone; a few retries absorb that.
+func (a *AzureCRP) deleteWithRetry(path string) error {
+	var lastErr error
+	for attempt := 0; attempt < 6; attempt++ {
+		if _, _, err := a.doAPI("DELETE", path, nil); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		time.Sleep(time.Duration(attempt+1) * 5 * time.Second)
+	}
+	return lastErr
 }
 
 // vmNetworkResources returns the resource IDs of the NICs attached to a VM and
