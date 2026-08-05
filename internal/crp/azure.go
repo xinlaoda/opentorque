@@ -416,8 +416,9 @@ func (a *AzureCRP) Reclaim(ref VMRef, policy string, destroy bool) error {
 		a.subscription, rg, ref.VMID)
 
 	if destroy {
-		_, _, err := a.doAPI("DELETE", path+"?forceDeletion=true", nil)
-		return err
+		// Delete the VM and its attached NICs/public IPs so scale-in leaves no
+		// orphaned resources (Azure does not cascade those with the VM).
+		return a.destroyVM(rg, ref.VMID)
 	}
 
 	switch policy {
@@ -433,7 +434,94 @@ func (a *AzureCRP) Reclaim(ref VMRef, policy string, destroy bool) error {
 	}
 }
 
+// destroyVM deletes the VM and its attached network resources (NICs, and any
+// public IPs) so no orphaned resources remain after scale-in. Azure does not
+// cascade-delete a VM's network interfaces when the VM is deleted.
+func (a *AzureCRP) destroyVM(rg, vmName string) error {
+	vmPath := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/virtualMachines/%s",
+		a.subscription, rg, vmName)
+
+	// Capture attached NICs (and any public IPs) before deleting the VM.
+	nics, pips := a.vmNetworkResources(rg, vmName)
+
+	if _, _, err := a.doAPI("DELETE", vmPath+"?forceDeletion=true", nil); err != nil {
+		return err
+	}
+
+	// The VM is gone; delete its NICs and public IPs so no orphaned resources
+	// remain. A failure here is logged, not fatal — the VM is already removed.
+	for _, nic := range nics {
+		if _, _, err := a.doAPI("DELETE", nic, nil); err != nil {
+			log.Printf("[CRP] destroyVM: failed to delete NIC %s: %v", nic, err)
+		}
+	}
+	for _, pip := range pips {
+		if _, _, err := a.doAPI("DELETE", pip, nil); err != nil {
+			log.Printf("[CRP] destroyVM: failed to delete PublicIP %s: %v", pip, err)
+		}
+	}
+	return nil
+}
+
+// vmNetworkResources returns the resource IDs of the NICs attached to a VM and
+// any public IPs those NICs reference, suitable for DELETE.
+func (a *AzureCRP) vmNetworkResources(rg, vmName string) (nics, pips []string) {
+	vmPath := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/virtualMachines/%s",
+		a.subscription, rg, vmName)
+	body, _, err := a.doAPI("GET", vmPath, nil)
+	if err != nil {
+		return nil, nil
+	}
+
+	var vm struct {
+		Properties struct {
+			NetworkProfile struct {
+				NetworkInterfaces []struct {
+					ID string `json:"id"`
+				} `json:"networkInterfaces"`
+			} `json:"networkProfile"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(body, &vm); err != nil {
+		return nil, nil
+	}
+
+	for _, ni := range vm.Properties.NetworkProfile.NetworkInterfaces {
+		if ni.ID == "" {
+			continue
+		}
+		nics = append(nics, ni.ID)
+
+		// Read the NIC to find any public IP it uses.
+		nicBody, _, err := a.doAPI("GET", ni.ID, nil)
+		if err != nil {
+			continue
+		}
+		var nic struct {
+			Properties struct {
+				IPConfigurations []struct {
+					Properties struct {
+						PublicIPAddress *struct {
+							ID string `json:"id"`
+						} `json:"publicIPAddress"`
+					} `json:"properties"`
+				} `json:"ipConfigurations"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(nicBody, &nic); err != nil {
+			continue
+		}
+		for _, ipc := range nic.Properties.IPConfigurations {
+			if ipc.Properties.PublicIPAddress != nil && ipc.Properties.PublicIPAddress.ID != "" {
+				pips = append(pips, ipc.Properties.PublicIPAddress.ID)
+			}
+		}
+	}
+	return nics, pips
+}
+
 // Resume starts a stopped/deallocated VM.
+
 func (a *AzureCRP) Resume(ref VMRef) error {
 	rg, _ := a.splitRef(ref)
 	path := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/virtualMachines/%s/start",

@@ -3,7 +3,7 @@
 # This file controls both built-in and external scheduler behavior.
 # Location: $PBS_HOME/sched_priv/sched_config
 
-# scheduler_mode: builtin | external
+# scheduler_mode: external | external
 #   builtin  - Server's built-in FIFO scheduler (high throughput, low overhead)
 #   external - External pbs_sched process (advanced algorithms)
 scheduler_mode: builtin
