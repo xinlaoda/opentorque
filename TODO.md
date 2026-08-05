@@ -503,6 +503,13 @@ dynamic VM, then idle-time-based drain/deregister/deallocate all ran live:
 - Remaining stubs: cloud_reclaim=hibernate fast-resume and provisioning-timeout
   (qdel-during-provisioning) cleanup are not yet exercised; only deallocate is
   live-verified.
+- Destroy-path resource cleanup: when scale-in reclaims with destroy=true
+  (VM deleted rather than deallocated), provider.Reclaim now deletes the VM's
+  attached NICs and any public IPs too (commit 2b1375d). Azure does not
+  cascade-delete a VM's NICs, so this prevents orphaned network interfaces
+  accumulating in the resource group after scale-in. Verified live: 7 orphaned
+  ot-node-* NICs left by earlier scale-in tests were manually removed and none
+  remained after the fix.
 
 - **M4** — cooldown tuning, shortfall headroom, `NeedCapacity` merge/coalesce,
   drain timeout policy, surface per-pool free-cores via a status RPC (extends
