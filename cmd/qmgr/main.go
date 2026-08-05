@@ -183,73 +183,81 @@ func listObject(conn *client.Conn, objType int, name string) error {
 	return nil
 }
 
-// parseAttrs parses "attr = value" or "attr += value" tokens into svrattrl list.
+// parseAttrs parses "attr = value" (or "attr += value" / "attr -= value")
+// assignments from the whitespace-tokenized command line into an svrattrl
+// list. Attribute groups are separated by whitespace (a new key starts a new
+// attribute), so a value that itself contains commas (e.g. route_destinations
+// = short_q,long_q) is preserved as a single value rather than being split. A
+// bare "attr" with no value is treated as an unset-style attribute.
 func parseAttrs(tokens []string) []dis.SvrAttrl {
-	// Join remaining tokens and split by commas for multiple attrs
-	remaining := strings.Join(tokens, " ")
-	if remaining == "" {
-		return nil
-	}
-
 	var attrs []dis.SvrAttrl
-	for _, part := range strings.Split(remaining, ",") {
-		part = strings.TrimSpace(part)
 
-		// Detect += (INCR) operator
-		if idx := strings.Index(part, "+="); idx >= 0 {
-			key := strings.TrimSpace(part[:idx])
-			val := strings.TrimSpace(part[idx+2:])
-			attr := dis.SvrAttrl{Name: key, Value: val, Op: 7} // INCR (append)
-			if dotIdx := strings.Index(key, "."); dotIdx > 0 {
-				attr.Name = key[:dotIdx]
-				attr.HasResc = true
-				attr.Resc = key[dotIdx+1:]
-			}
-			attrs = append(attrs, attr)
-			continue
+	add := func(key string, op int, val string) {
+		key = strings.TrimSpace(key)
+		val = strings.TrimSpace(val)
+		if key == "" {
+			return
 		}
-
-		// Detect -= (DECR/remove) operator
-		if idx := strings.Index(part, "-="); idx >= 0 {
-			key := strings.TrimSpace(part[:idx])
-			val := strings.TrimSpace(part[idx+2:])
-			attr := dis.SvrAttrl{Name: key, Value: val, Op: 8} // DECR (remove)
-			if dotIdx := strings.Index(key, "."); dotIdx > 0 {
-				attr.Name = key[:dotIdx]
-				attr.HasResc = true
-				attr.Resc = key[dotIdx+1:]
-			}
-			attrs = append(attrs, attr)
-			continue
-		}
-
-		eqIdx := strings.Index(part, "=")
-		if eqIdx < 0 {
-			// No '=' sign — this is an unset operation (just attribute name)
-			key := strings.TrimSpace(part)
-			if key == "" {
-				continue
-			}
-			attr := dis.SvrAttrl{Name: key, Op: 1}
-			if dotIdx := strings.Index(key, "."); dotIdx > 0 {
-				attr.Name = key[:dotIdx]
-				attr.HasResc = true
-				attr.Resc = key[dotIdx+1:]
-			}
-			attrs = append(attrs, attr)
-			continue
-		}
-		key := strings.TrimSpace(part[:eqIdx])
-		val := strings.TrimSpace(part[eqIdx+1:])
-
-		attr := dis.SvrAttrl{Name: key, Value: val, Op: 1} // SET
-		// Check for resource sub-attribute (e.g., resources_max.walltime)
+		attr := dis.SvrAttrl{Name: key, Value: val, Op: op}
 		if dotIdx := strings.Index(key, "."); dotIdx > 0 {
 			attr.Name = key[:dotIdx]
 			attr.HasResc = true
 			attr.Resc = key[dotIdx+1:]
 		}
 		attrs = append(attrs, attr)
+	}
+
+	i := 0
+	for i < len(tokens) {
+		tok := tokens[i]
+
+		// Detect an operator embedded in this token: "key=", "key+=", "key-="
+		opAt, opLen, op := -1, 0, 1 // SET=1
+		for _, cand := range []struct {
+			op  string
+			len int
+			code int
+		}{{"+=", 2, 7}, {"-=", 2, 8}, {"=", 1, 1}} {
+			if idx := strings.Index(tok, cand.op); idx >= 0 {
+				opAt, opLen, op = idx, cand.len, cand.code
+				break
+			}
+		}
+
+		if opAt < 0 {
+			// No operator in this token: "key" [op value]? or bare "key"
+			key := tok
+			i++
+			if i < len(tokens) && (tokens[i] == "=" || tokens[i] == "+=" || tokens[i] == "-=") {
+				if tokens[i] == "+=" {
+					op = 7
+				} else if tokens[i] == "-=" {
+					op = 8
+				}
+				i++
+				if i < len(tokens) {
+					add(key, op, tokens[i])
+					i++
+				} else {
+					add(key, op, "")
+				}
+				continue
+			}
+			add(key, op, "")
+			continue
+		}
+
+		// Operator attached in this token: key<op>[value]
+		key := tok[:opAt]
+		val := tok[opAt+opLen:]
+		i++
+		if strings.TrimSpace(val) == "" && i < len(tokens) &&
+			tokens[i] != "=" && tokens[i] != "+=" && tokens[i] != "-=" {
+			// Follow-on value token, e.g. "route_destinations =" "short_q,long_q"
+			val = tokens[i]
+			i++
+		}
+		add(key, op, val)
 	}
 	return attrs
 }

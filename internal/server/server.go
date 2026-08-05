@@ -2316,6 +2316,9 @@ func (s *Server) formatQueueStatus(q *queue.Queue) dis.StatusObject {
 		add("from_route_only", "True")
 	}
 
+	for k, v := range q.ResourceMin {
+		attrs = append(attrs, dis.SvrAttrl{Name: "resources_min", HasResc: true, Resc: k, Value: v, Op: 1})
+	}
 	for k, v := range q.ResourceMax {
 		attrs = append(attrs, dis.SvrAttrl{Name: "resources_max", HasResc: true, Resc: k, Value: v, Op: 1})
 	}
@@ -2870,6 +2873,14 @@ func (s *Server) applyJobAttrs(j *job.Job, attrs []dis.SvrAttrl) {
 func (s *Server) applyQueueAttrs(q *queue.Queue, attrs []dis.SvrAttrl) {
 	q.Mu.Lock()
 	defer q.Mu.Unlock()
+
+	// TORQUE's qmgr sends comma-separated list attributes as multiple SvrAttrl
+	// entries sharing the same name (one per value). Accumulate those entries
+	// into one list per attribute instead of letting each entry overwrite the
+	// previous one (see TODO 3.1: route_destinations, acl_users, acl_groups,
+	// acl_hosts).
+	var aclUsers, aclGroups, aclHosts, routeDest []string
+	hasACLUsers, hasACLGroups, hasACLHosts, hasRouteDest := false, false, false, false
 	for _, a := range attrs {
 		switch a.Name {
 		case "queue_type":
@@ -2933,22 +2944,50 @@ func (s *Server) applyQueueAttrs(q *queue.Queue, attrs []dis.SvrAttrl) {
 		case "acl_user_enable", "acl_user_enabled":
 			q.ACLUserEnabled = (a.Value == "True" || a.Value == "true" || a.Value == "1")
 		case "acl_users":
-			q.ACLUsers = queue.ParseList(a.Value)
+			if !hasACLUsers {
+				aclUsers = nil
+				hasACLUsers = true
+			}
+			aclUsers = append(aclUsers, queue.ParseList(a.Value)...)
 		case "acl_group_enable", "acl_group_enabled":
 			q.ACLGroupEnabled = (a.Value == "True" || a.Value == "true" || a.Value == "1")
 		case "acl_groups":
-			q.ACLGroups = queue.ParseList(a.Value)
+			if !hasACLGroups {
+				aclGroups = nil
+				hasACLGroups = true
+			}
+			aclGroups = append(aclGroups, queue.ParseList(a.Value)...)
 		case "acl_host_enable", "acl_host_enabled":
 			q.ACLHostEnabled = (a.Value == "True" || a.Value == "true" || a.Value == "1")
 		case "acl_hosts":
-			q.ACLHosts = queue.ParseList(a.Value)
+			if !hasACLHosts {
+				aclHosts = nil
+				hasACLHosts = true
+			}
+			aclHosts = append(aclHosts, queue.ParseList(a.Value)...)
 		case "route_destinations", "route_destin":
-			q.RouteDestin = queue.ParseList(a.Value)
+			if !hasRouteDest {
+				routeDest = nil
+				hasRouteDest = true
+			}
+			routeDest = append(routeDest, queue.ParseList(a.Value)...)
 		case "from_route_only":
 			q.Attrs["from_route_only"] = a.Value
 		default:
 			q.Attrs[a.Name] = a.Value
 		}
+	}
+	if hasACLUsers {
+		q.ACLUsers = aclUsers
+	}
+	if hasACLGroups {
+		q.ACLGroups = aclGroups
+	}
+	if hasACLHosts {
+		q.ACLHosts = aclHosts
+	}
+	if hasRouteDest {
+		q.RouteDestin = routeDest
 	}
 }
 

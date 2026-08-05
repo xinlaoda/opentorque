@@ -238,7 +238,7 @@ Implemented in `internal/server/server.go`:
 
 ## 3. Queue routing & job control
 
-### 3.1 Automatic queue routing (`queue_type=R`)  [STUB/GAP]
+### 3.1 Automatic queue routing (`queue_type=R`)  [DONE - implemented & live-tested]
 `TypeRoute` and `RouteDestin` exist in the data model and `qmgr` can create a
 `queue_type=Route` queue, but **no forwarding engine exists**: `RouteDestin` is
 never read anywhere. A job submitted to a route queue is treated as a normal
@@ -249,6 +249,16 @@ execution job and runs directly in that queue (verified live: job ran in
   does not even inspect `queue_type`).
 - Expected: on submit to a route queue, choose a destination from
   `RouteDestin` and move/requeue the job there.
+
+> **DONE (2026-08-05):** `internal/server/route.go` implements `routeJob` - a
+> job submitted to a `queue_type=Route` queue is forwarded to the first
+> passable `route_destinations` entry; the scheduler skips route queues (they
+> never run as execution queues). `finalizeRoute` runs in both commit paths.
+> Also fixed `cmd/qmgr` `parseAttrs`, which split comma-list values
+> (`route_destinations = short_q,long_q`) into bogus separate attrs, dropping
+> all but the first destination; it now keeps the comma-list as a single value.
+> Live: `route_q2` (`short_q,long_q`) routed a 00:05 job to `short_q` and a
+> 01:00 job to `long_q`; both ran to completion.
 
 ### 3.2 `qmove` of non-queued jobs  [GAP]
 `handleMoveJob` only allows `Queued` jobs; moving running/held jobs is rejected
@@ -307,7 +317,7 @@ Root causes fixed:
   `qdel`-of-running churn cycles, `testq`/`testq2` counters stayed `0`/all-zeros
   matching the (0) actual jobs, and no negative value was ever reported.
 
-### 3.7 Target-queue admission control (gatekeeping) for routing  [GAP]
+### 3.7 Target-queue admission control (gatekeeping) for routing  [DONE - implemented & live-tested]
 For automatic routing (3.1) to be useful, a target execution queue must be able
 to *accept or reject* a routed job. Real PBS/TORQUE runs an ordered admission
 gate (`svr_chkque`) before a job enters any queue; the router tries each
@@ -343,6 +353,20 @@ is hard and cannot be bypassed.
 - Expected: a single admission function returns pass/fail (+reason); the router
   uses it to pick the first accepting destination; `qsub` also uses it for
   direct submissions.
+
+> **DONE (2026-08-05):** `admitToQueue` in `internal/server/route.go` is the
+> ordered admission gate (`svr_chkque`): enabled/started, `from_route_only`,
+> `max_queuable`/`max_running`/`max_user_queuable`/`max_user_run` derived from
+> live state, ACL user/group/host, and the `resources_min`/`resources_max`
+> interval for ncpus/walltime/mem. Direct `qsub` validates the target execution
+> queue; routed jobs validate during destination selection. `applyQueueAttrs`
+> now wires the new attrs and `formatQueueStatus` displays them incl.
+> `resources_min`. `qmgr` list attrs accumulate across comma-split SvrAttrl
+> entries (real-TORQUE interop). Live: `from_route_only` on `batch` rejected
+> direct `qsub` (15007) but accepted routed jobs; `short_q` rejected a 01:00
+> walltime job at the gate, which then routed to `long_q`.
+> Note: queue resource limits (`resources_min`/`resources_max`/`resources_default`)
+> are held in memory only and are not persisted across a server restart yet.
 
 ## 4. Cloud / platform integration
 
@@ -545,12 +569,18 @@ redundancy used in production.
 Beyond the `qstat -f` 15001 bug (2.4), there is no retention/query path that
 reliably returns full attributes of finished jobs.
 
-### 5.3 No Go unit tests  [GAP]
+### 5.3 No Go unit tests  [DONE - added]
 `go test ./...` finds no test files; correctness is validated only by manual
 integration testing. Adding at least unit tests for the scheduler sort
 policies and node selection would help prevent regressions.
 
 ---
+
+> **DONE (2026-08-05):** added Go unit tests for the routing/admission work:
+> `internal/queue/queue_test.go` (`ParseList`), `internal/server/route_test.go`
+> (routing + admission gate), `internal/sched/scheduler/scheduler_test.go`, and
+> `cmd/qmgr/parse_attrs_test.go` (list-valued attribute parsing).
+> `go test ./internal/... ./cmd/qmgr` passes on the VM.
 
 ## Suggested triage order
 1. Fix the data-loss bugs: 2.3 (`-l` overwrite), 2.4 (`qstat -f` 15001), 2.5 (`qrun`).
