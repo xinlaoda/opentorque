@@ -1325,6 +1325,7 @@ func (s *Server) handleRerunJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestHe
 		return true
 	}
 
+	reqCPUs := jobRequestedCPUs(j)
 	j.Mu.Lock()
 	oldState := j.State
 	if oldState != job.StateRunning && oldState != job.StateQueued {
@@ -1338,7 +1339,7 @@ func (s *Server) handleRerunJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestHe
 		nodeName := strings.Split(j.ExecHost, "/")[0]
 		if n := s.nodeMgr.GetNode(nodeName); n != nil {
 			n.Mu.Lock()
-			n.ReleaseJob(j.ID, jobRequestedCPUs(j))
+			n.ReleaseJob(j.ID, reqCPUs)
 			n.Mu.Unlock()
 		}
 	}
@@ -3668,6 +3669,7 @@ func (s *Server) requeueNodeJobs(nodeName string) {
 		if j == nil {
 			continue
 		}
+		reqCPUs := jobRequestedCPUs(j)
 		j.Mu.Lock()
 		if j.State != job.StateRunning {
 			j.Mu.Unlock()
@@ -3678,7 +3680,7 @@ func (s *Server) requeueNodeJobs(nodeName string) {
 
 		// Free the CPU slots this job consumed on the (dead) node.
 		n.Mu.Lock()
-		n.ReleaseJob(j.ID, jobRequestedCPUs(j))
+		n.ReleaseJob(j.ID, reqCPUs)
 		n.Mu.Unlock()
 
 		j.ExecHost = ""
