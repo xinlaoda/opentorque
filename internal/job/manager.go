@@ -273,3 +273,56 @@ func (m *Manager) CountRunningByGroup(group string) int {
 	}
 	return count
 }
+
+// CountByStateInQueue counts jobs in a queue that are in any of the given
+// states. Used by the queue admission gate (TODO 3.7) to enforce limits from
+// live state rather than unreliable cached counters.
+func (m *Manager) CountByStateInQueue(queueName string, states ...int) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	count := 0
+	want := make(map[int]bool, len(states))
+	for _, s := range states {
+		want[s] = true
+	}
+	for _, j := range m.jobs {
+		j.Mu.RLock()
+		if j.Queue == queueName && want[j.State] {
+			count++
+		}
+		j.Mu.RUnlock()
+	}
+	return count
+}
+
+// CountQueuedByOwnerInQueue counts queued (or provisioning) jobs owned by a
+// user in a queue, for per-user max_queuable enforcement.
+func (m *Manager) CountQueuedByOwnerInQueue(queueName, owner string) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	count := 0
+	for _, j := range m.jobs {
+		j.Mu.RLock()
+		if j.Queue == queueName && (j.State == StateQueued || j.State == StateProvisioning) && j.Owner == owner {
+			count++
+		}
+		j.Mu.RUnlock()
+	}
+	return count
+}
+
+// CountRunningByOwnerInQueue counts running jobs owned by a user in a queue,
+// for per-user max_user_run enforcement.
+func (m *Manager) CountRunningByOwnerInQueue(queueName, owner string) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	count := 0
+	for _, j := range m.jobs {
+		j.Mu.RLock()
+		if j.Queue == queueName && j.State == StateRunning && j.Owner == owner {
+			count++
+		}
+		j.Mu.RUnlock()
+	}
+	return count
+}

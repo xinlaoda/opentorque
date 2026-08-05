@@ -567,7 +567,7 @@ func (it *jobIterator) nextRoundRobin() *JobInfo {
 		qIdx := it.qIdx % numQueues
 		it.qIdx++
 		q := it.sinfo.Queues[qIdx]
-		if !q.Enabled || !q.Started {
+		if !q.Enabled || !q.Started || isRouteQueue(q) {
 			continue
 		}
 		jIdx := it.jIdx[qIdx]
@@ -597,7 +597,7 @@ func (it *jobIterator) nextRoundRobin() *JobInfo {
 func (it *jobIterator) nextByQueue() *JobInfo {
 	for it.qIdx < len(it.sinfo.Queues) {
 		q := it.sinfo.Queues[it.qIdx]
-		if !q.Enabled || !q.Started {
+		if !q.Enabled || !q.Started || isRouteQueue(q) {
 			it.qIdx++
 			continue
 		}
@@ -619,7 +619,7 @@ func (it *jobIterator) nextByQueue() *JobInfo {
 func (it *jobIterator) nextFlat() *JobInfo {
 	for it.qIdx < len(it.sinfo.Queues) {
 		q := it.sinfo.Queues[it.qIdx]
-		if !q.Enabled || !q.Started {
+		if !q.Enabled || !q.Started || isRouteQueue(q) {
 			it.qIdx++
 			continue
 		}
@@ -679,6 +679,14 @@ func (s *Scheduler) findNodeForJob(sinfo *ServerInfo, jinfo *JobInfo) *NodeInfo 
 	}
 
 	return candidates[0]
+}
+
+// isRouteQueue reports whether a queue is a Route queue (jobs are forwarded to
+// a destination rather than run locally). The server routes jobs out of route
+// queues at commit time, so the scheduler should never dispatch from them.
+func isRouteQueue(q *QueueInfo) bool {
+	t := strings.ToLower(strings.TrimSpace(q.Type))
+	return t == "route" || t == "r"
 }
 
 // nodeHasAllFeatures reports whether node n carries every property in want.

@@ -3,6 +3,7 @@ package queue
 
 import (
 	"log"
+	"strings"
 	"sync"
 )
 
@@ -71,6 +72,24 @@ type Queue struct {
 	CloudSSHKey    string // authorized SSH public key for worker VMs
 	CloudLocation  string // Azure region for worker VM creation ("" = server region)
 	CloudRgName    string // Azure resource group for worker VMs ("" = server rg)
+}
+
+// ParseList splits a comma/space separated configuration value into a trimmed,
+// de-duplicated list (used for route_destinations, acl_users, acl_groups, ...).
+func ParseList(v string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		for _, sub := range strings.Fields(part) {
+			sub = strings.TrimSpace(sub)
+			if sub == "" || seen[sub] {
+				continue
+			}
+			seen[sub] = true
+			out = append(out, sub)
+		}
+	}
+	return out
 }
 
 // NewQueue creates a new queue with defaults.

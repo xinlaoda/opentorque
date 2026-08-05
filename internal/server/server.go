@@ -670,6 +670,16 @@ func (s *Server) handleJobScript(conn net.Conn, r *dis.Reader, hdr *dis.RequestH
 		// Transition via manager to update state counters
 		s.jobMgr.UpdateJobState(jobID, job.StateQueued, job.SubstateQueued)
 
+		// Route queue -> destination and run the admission gate (TODO 3.1/3.7).
+		// Reject the job if no destination accepts it.
+		if err := s.finalizeRoute(j, j.Owner); err != nil {
+			log.Printf("[SERVER] Job %s rejected: %v", jobID, err)
+			s.jobMgr.RemoveJob(jobID)
+			os.Remove(filepath.Join(s.cfg.JobsDir, jobID+".SC"))
+			dis.SendErrorReply(conn, dis.PbsePerm, 0)
+			return false
+		}
+
 		// Apply hold or deferred execution after initial state transition
 		j.Mu.RLock()
 		holdTypes := j.HoldTypes
@@ -734,8 +744,18 @@ func (s *Server) handleCommit(conn net.Conn, r *dis.Reader, hdr *dis.RequestHead
 	// Set default output paths if not specified by user
 	s.setDefaultOutputPaths(j)
 
-	// Transition job to Queued state via manager (updates state counters)
+	// Transition via manager to update state counters
 	s.jobMgr.UpdateJobState(jobID, job.StateQueued, job.SubstateQueued)
+
+	// Route queue -> destination and run the admission gate (TODO 3.1/3.7).
+	// Reject the job if no destination accepts it.
+	if err := s.finalizeRoute(j, j.Owner); err != nil {
+		log.Printf("[SERVER] Job %s rejected: %v", jobID, err)
+		s.jobMgr.RemoveJob(jobID)
+		os.Remove(filepath.Join(s.cfg.JobsDir, jobID+".SC"))
+		dis.SendErrorReply(conn, dis.PbsePerm, 0)
+		return false
+	}
 
 	// Apply hold or deferred execution after initial state transition
 	j.Mu.RLock()
@@ -2265,6 +2285,36 @@ func (s *Server) formatQueueStatus(q *queue.Queue) dis.StatusObject {
 	if q.MaxRun > 0 {
 		add("max_running", strconv.Itoa(q.MaxRun))
 	}
+	if q.MaxUserJobs > 0 {
+		add("max_user_queuable", strconv.Itoa(q.MaxUserJobs))
+	}
+	if q.MaxUserRun > 0 {
+		add("max_user_run", strconv.Itoa(q.MaxUserRun))
+	}
+	if q.ACLUserEnabled {
+		add("acl_user_enable", "True")
+	}
+	if len(q.ACLUsers) > 0 {
+		add("acl_users", strings.Join(q.ACLUsers, ","))
+	}
+	if q.ACLGroupEnabled {
+		add("acl_group_enable", "True")
+	}
+	if len(q.ACLGroups) > 0 {
+		add("acl_groups", strings.Join(q.ACLGroups, ","))
+	}
+	if q.ACLHostEnabled {
+		add("acl_host_enable", "True")
+	}
+	if len(q.ACLHosts) > 0 {
+		add("acl_hosts", strings.Join(q.ACLHosts, ","))
+	}
+	if len(q.RouteDestin) > 0 {
+		add("route_destinations", strings.Join(q.RouteDestin, ","))
+	}
+	if qAttrTrue(q.Attrs["from_route_only"]) {
+		add("from_route_only", "True")
+	}
 
 	for k, v := range q.ResourceMax {
 		attrs = append(attrs, dis.SvrAttrl{Name: "resources_max", HasResc: true, Resc: k, Value: v, Op: 1})
@@ -2876,6 +2926,26 @@ func (s *Server) applyQueueAttrs(q *queue.Queue, attrs []dis.SvrAttrl) {
 			q.CloudLocation = a.Value
 		case "cloud_rg_name":
 			q.CloudRgName = a.Value
+		case "max_user_queuable":
+			fmt.Sscanf(a.Value, "%d", &q.MaxUserJobs)
+		case "max_user_run":
+			fmt.Sscanf(a.Value, "%d", &q.MaxUserRun)
+		case "acl_user_enable", "acl_user_enabled":
+			q.ACLUserEnabled = (a.Value == "True" || a.Value == "true" || a.Value == "1")
+		case "acl_users":
+			q.ACLUsers = queue.ParseList(a.Value)
+		case "acl_group_enable", "acl_group_enabled":
+			q.ACLGroupEnabled = (a.Value == "True" || a.Value == "true" || a.Value == "1")
+		case "acl_groups":
+			q.ACLGroups = queue.ParseList(a.Value)
+		case "acl_host_enable", "acl_host_enabled":
+			q.ACLHostEnabled = (a.Value == "True" || a.Value == "true" || a.Value == "1")
+		case "acl_hosts":
+			q.ACLHosts = queue.ParseList(a.Value)
+		case "route_destinations", "route_destin":
+			q.RouteDestin = queue.ParseList(a.Value)
+		case "from_route_only":
+			q.Attrs["from_route_only"] = a.Value
 		default:
 			q.Attrs[a.Name] = a.Value
 		}
@@ -4242,6 +4312,26 @@ func (s *Server) recoverQueues() {
 						q.CloudLocation = val
 					case "cloud_rg_name":
 						q.CloudRgName = val
+					case "max_user_queuable":
+						fmt.Sscanf(val, "%d", &q.MaxUserJobs)
+					case "max_user_run":
+						fmt.Sscanf(val, "%d", &q.MaxUserRun)
+					case "acl_user_enable":
+						q.ACLUserEnabled = (val == "True")
+					case "acl_users":
+						q.ACLUsers = queue.ParseList(val)
+					case "acl_group_enable":
+						q.ACLGroupEnabled = (val == "True")
+					case "acl_groups":
+						q.ACLGroups = queue.ParseList(val)
+					case "acl_host_enable":
+						q.ACLHostEnabled = (val == "True")
+					case "acl_hosts":
+						q.ACLHosts = queue.ParseList(val)
+					case "route_destinations":
+						q.RouteDestin = queue.ParseList(val)
+					case "from_route_only":
+						q.Attrs["from_route_only"] = val
 					}
 				}
 			}
@@ -4596,6 +4686,38 @@ func (s *Server) saveQueue(q *queue.Queue) {
 	}
 	if q.CloudRgName != "" {
 		sb.WriteString("cloud_rg_name=" + q.CloudRgName + "\n")
+	}
+
+	// Limits, ACLs and route destinations (TODO 3.1/3.7)
+	if q.MaxUserJobs > 0 {
+		sb.WriteString(fmt.Sprintf("max_user_queuable=%d\n", q.MaxUserJobs))
+	}
+	if q.MaxUserRun > 0 {
+		sb.WriteString(fmt.Sprintf("max_user_run=%d\n", q.MaxUserRun))
+	}
+	if q.ACLUserEnabled {
+		sb.WriteString("acl_user_enable=True\n")
+	}
+	if len(q.ACLUsers) > 0 {
+		sb.WriteString("acl_users=" + strings.Join(q.ACLUsers, ",") + "\n")
+	}
+	if q.ACLGroupEnabled {
+		sb.WriteString("acl_group_enable=True\n")
+	}
+	if len(q.ACLGroups) > 0 {
+		sb.WriteString("acl_groups=" + strings.Join(q.ACLGroups, ",") + "\n")
+	}
+	if q.ACLHostEnabled {
+		sb.WriteString("acl_host_enable=True\n")
+	}
+	if len(q.ACLHosts) > 0 {
+		sb.WriteString("acl_hosts=" + strings.Join(q.ACLHosts, ",") + "\n")
+	}
+	if len(q.RouteDestin) > 0 {
+		sb.WriteString("route_destinations=" + strings.Join(q.RouteDestin, ",") + "\n")
+	}
+	if qAttrTrue(q.Attrs["from_route_only"]) {
+		sb.WriteString("from_route_only=True\n")
 	}
 
 	path := filepath.Join(s.cfg.QueuesDir, q.Name)
