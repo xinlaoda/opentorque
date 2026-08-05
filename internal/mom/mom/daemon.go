@@ -76,6 +76,9 @@ func (d *Daemon) Run() error {
 	if err := d.cfg.EnsureDirs(); err != nil {
 		return fmt.Errorf("ensure dirs: %w", err)
 	}
+	// Kill any job process groups orphaned by a previous MOM run before we
+	// accept new jobs; at startup the job manager is empty so none are tracked.
+	d.executor.ReapStaleSessions()
 
 	// Write PID file
 	if err := d.writePIDFile(); err != nil {
@@ -739,6 +742,10 @@ func (d *Daemon) handleCommit(conn net.Conn, reader *dis.Reader, header *dis.Req
 		dis.SendErrorReply(conn, dis.PbsErrSystem, 0)
 		return false
 	}
+
+	// If a previous instance of this job was orphaned (not tracked but its
+	// process group may still be running), reap it before starting a new one.
+	d.executor.KillStaleSession(jobID)
 
 	// Start job execution
 	if err := d.executor.StartJob(j); err != nil {

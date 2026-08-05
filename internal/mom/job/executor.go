@@ -127,6 +127,10 @@ func (e *Executor) StartJob(j *Job) error {
 	j.Substate = SubstateRunning
 	j.StartTime = time.Now()
 
+	// Persist the running session id so a later MOM restart (or a re-dispatch
+	// of the same job) can reap this process group instead of orphaning it.
+	e.persistSession(j.ID, j.SessionID)
+
 	// Add task
 	task := &Task{
 		ID:       0,
@@ -291,6 +295,73 @@ func (e *Executor) CleanupJob(j *Job) {
 	os.Remove(filepath.Join(e.pbsHome, "aux", j.ID))
 
 	log.Printf("[EXEC] Cleaned up job %s files", j.ID)
+}
+
+// sessionFile returns the on-disk record of a running job's session id.
+func (e *Executor) sessionFile(id string) string {
+	return filepath.Join(e.jobsDir, id+".SID")
+}
+
+// persistSession records a running job's process-session id to disk. The MOM
+// does not keep running job processes across a restart, so any recorded session
+// that is still present when the MOM starts (or re-dispatches the same job) is
+// by definition orphaned and is reaped by KillStaleSession/ReapStaleSessions.
+func (e *Executor) persistSession(id string, sid int) {
+	if sid <= 0 {
+		return
+	}
+	if err := os.WriteFile(e.sessionFile(id), []byte(fmt.Sprintf("%d\n", sid)), 0644); err != nil {
+		log.Printf("[EXEC] Failed to record session for %s: %v", id, err)
+	}
+}
+
+// KillStaleSession kills the process group/session recorded on disk for a job
+// id if it is no longer the currently-tracked instance. This prevents a job
+// that is re-dispatched on the same MOM from stacking a second process group
+// alongside an untracked orphan from a previous run.
+func (e *Executor) KillStaleSession(id string) {
+	data, err := os.ReadFile(e.sessionFile(id))
+	if err != nil {
+		return
+	}
+	var sid int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &sid); err != nil || sid <= 0 {
+		os.Remove(e.sessionFile(id))
+		return
+	}
+	log.Printf("[EXEC] Reaping stale session %d for job %s", sid, id)
+	if err := killSession(sid, syscall.SIGKILL); err != nil {
+		log.Printf("[EXEC] Failed to reap stale session %d for %s: %v", sid, id, err)
+	}
+	os.Remove(e.sessionFile(id))
+}
+
+// ReapStaleSessions scans the jobs directory for leftover *.SID records (from a
+// previous MOM run that was stopped/crashed without cleaning up) and kills the
+// corresponding orphaned process groups. Called once at MOM startup, when the
+// job manager is empty and therefore every recorded session is untracked.
+func (e *Executor) ReapStaleSessions() {
+	entries, err := os.ReadDir(e.jobsDir)
+	if err != nil {
+		log.Printf("[EXEC] Cannot scan %s for stale sessions: %v", e.jobsDir, err)
+		return
+	}
+	for _, ent := range entries {
+		name := ent.Name()
+		if !strings.HasSuffix(name, ".SID") || ent.IsDir() {
+			continue
+		}
+		id := strings.TrimSuffix(name, ".SID")
+		e.KillStaleSession(id)
+	}
+}
+
+// killSession sends a signal to a process group/session by id.
+func killSession(sid int, sig syscall.Signal) error {
+	if runtime.GOOS == "windows" || sid <= 0 {
+		return nil
+	}
+	return syscall.Kill(-sid, sig)
 }
 
 // DeliverOutput copies spool stdout/stderr to the final output paths.
