@@ -860,7 +860,7 @@ func (s *Server) handleCommit(conn net.Conn, r *dis.Reader, hdr *dis.RequestHead
 		return false
 	}
 	log.Printf("[SERVER] Commit job %s to queue %s", jobID, j.Queue)
-dis.SendJobIDReply(conn, dis.ReplyChoiceCommit, jobID)
+	dis.SendJobIDReply(conn, dis.ReplyChoiceCommit, jobID)
 	return true
 }
 
@@ -1371,25 +1371,41 @@ func (s *Server) handleMoveJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestHea
 	j.Mu.Lock()
 	oldQueue := j.Queue
 	oldState := j.State
-	if oldState != job.StateQueued {
+
+	// Standard qmove semantics: queued, held, and waiting jobs can be moved to
+	// another queue with their state preserved. A RUNNING job cannot be moved
+	// directly -- it must be rerun first (qrerun) so its node slot is released
+	// cleanly. Rejecting it here avoids a dangerous requeue path that would
+	// leave the MOM instance on the old node still running and can deadlock the
+	// server (the scheduler/MOM threads may hold a node lock while this handler
+	// waits on the job lock, and vice-versa).
+	if oldState == job.StateRunning || oldState == job.StateExiting ||
+		oldState == job.StateComplete || oldState == job.StateProvisioning {
 		j.Mu.Unlock()
 		dis.SendErrorReply(conn, dis.PbseBadReq, 0)
 		return true
 	}
+
+	// A same-queue move (qmove dest==current) is a benign no-op.
+	if oldQueue == queueName {
+		j.Mu.Unlock()
+		dis.SendOkReply(conn)
+		return true
+	}
+
 	j.Queue = queueName
 	j.Mu.Unlock()
 
-	// Update queue counters. A move decrements the source queue (job left,
-	// TotalJobs and StateJobs) and increments the destination queue (job
-	// entered). TransferJobState only moves between state slots and does NOT
-	// touch TotalJobs, so it must not be used here — otherwise TotalJobs drifts
-	// (stays too high in the old queue, too low in the new one) under churn
-	// (see TODO 3.6).
+	// A move decrements the source queue and increments the destination queue
+	// with the SAME state. TransferJobState only moves between state slots and
+	// does NOT touch TotalJobs, so it must not be used here, otherwise
+	// TotalJobs drifts under churn (see TODO 3.6).
 	if oq := s.queueMgr.GetQueue(oldQueue); oq != nil {
 		oq.DecrJobCount(oldState)
 	}
 	newQ.IncrJobCount(oldState)
 
+	s.triggerSched()
 	s.saveJob(j)
 	log.Printf("[SERVER] MoveJob %s from %s to %s", jobID, oldQueue, queueName)
 	dis.SendOkReply(conn)

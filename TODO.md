@@ -260,10 +260,23 @@ execution job and runs directly in that queue (verified live: job ran in
 > Live: `route_q2` (`short_q,long_q`) routed a 00:05 job to `short_q` and a
 > 01:00 job to `long_q`; both ran to completion.
 
-### 3.2 `qmove` of non-queued jobs  [GAP]
-`handleMoveJob` only allows `Queued` jobs; moving running/held jobs is rejected
-(`15004`). Standard `qmove` can move a broader set of states (operator
-permission permitting).
+### 3.2 `qmove` of non-queued jobs  [DONE - implemented & live-tested]
+`handleMoveJob` only allowed `Queued` jobs; moving held/waiting jobs was
+rejected. Standard `qmove` can move a broader set of non-running states.
+
+> **DONE (2026-08-06):** `handleMoveJob` now moves **Queued, Held, and Waiting**
+> jobs (state preserved, only the queue changes), and rejects **Running /
+> Exiting / Complete / Provisioning** jobs cleanly with `15004`. A running job
+> cannot be moved directly -- it must be rerun first (`qrerun`), matching
+> standard PBS/TORQUE semantics. The earlier approach that requeued running
+> jobs to the destination queue released node slots out from under the still
+> running MOM instance and deadlocked the server (qstat froze); that path is
+> removed. Same-queue moves are a benign no-op. Unit tests
+> `internal/server/movejob_test.go` (Queued / Held / Running-reject / Unknown
+> queue / Unknown job / Same-queue) pass. Live on `xxin-opentorque-srv`: queued
+> job moved Q mqa->mqb; held job moved H mqa->mqb; waiting job moved W mqa->mqb;
+> and a genuinely running job's `qmove` was rejected (15004) while the server
+> stayed responsive (`qstat` OK) -- the previous hang is gone.
 
 ### 3.3 Job arrays (`qsub -t`)  [DONE - implemented & live-tested]
 `-t 1-3` is accepted but never expanded into sub-jobs; it runs as a single job.
