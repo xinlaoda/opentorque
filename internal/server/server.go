@@ -4314,6 +4314,18 @@ func (s *Server) recoverQueues() {
 				if idx := strings.Index(line, "="); idx > 0 {
 					key := line[:idx]
 					val := line[idx+1:]
+					if strings.HasPrefix(key, "resources_min.") {
+						q.ResourceMin[key[len("resources_min."):]] = val
+						continue
+					}
+					if strings.HasPrefix(key, "resources_max.") {
+						q.ResourceMax[key[len("resources_max."):]] = val
+						continue
+					}
+					if strings.HasPrefix(key, "resources_default.") {
+						q.ResourceDflt[key[len("resources_default."):]] = val
+						continue
+					}
 					switch key {
 					case "queue_type":
 						if val == "Route" {
@@ -4351,6 +4363,10 @@ func (s *Server) recoverQueues() {
 						q.CloudLocation = val
 					case "cloud_rg_name":
 						q.CloudRgName = val
+					case "max_queuable":
+						fmt.Sscanf(val, "%d", &q.MaxJobs)
+					case "max_running":
+						fmt.Sscanf(val, "%d", &q.MaxRun)
 					case "max_user_queuable":
 						fmt.Sscanf(val, "%d", &q.MaxUserJobs)
 					case "max_user_run":
@@ -4759,6 +4775,22 @@ func (s *Server) saveQueue(q *queue.Queue) {
 		sb.WriteString("from_route_only=True\n")
 	}
 
+	// Queue limits and resource intervals (TODO 3.7) - persisted across restarts
+	if q.MaxJobs > 0 {
+		sb.WriteString(fmt.Sprintf("max_queuable=%d\n", q.MaxJobs))
+	}
+	if q.MaxRun > 0 {
+		sb.WriteString(fmt.Sprintf("max_running=%d\n", q.MaxRun))
+	}
+	for resc, v := range q.ResourceMin {
+		sb.WriteString("resources_min." + resc + "=" + v + "\n")
+	}
+	for resc, v := range q.ResourceMax {
+		sb.WriteString("resources_max." + resc + "=" + v + "\n")
+	}
+	for resc, v := range q.ResourceDflt {
+		sb.WriteString("resources_default." + resc + "=" + v + "\n")
+	}
 	path := filepath.Join(s.cfg.QueuesDir, q.Name)
 	tmpFile := path + ".new"
 	if err := os.WriteFile(tmpFile, []byte(sb.String()), 0640); err == nil {

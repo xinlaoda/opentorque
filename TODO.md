@@ -365,8 +365,9 @@ is hard and cannot be bypassed.
 > entries (real-TORQUE interop). Live: `from_route_only` on `batch` rejected
 > direct `qsub` (15007) but accepted routed jobs; `short_q` rejected a 01:00
 > walltime job at the gate, which then routed to `long_q`.
-> Note: queue resource limits (`resources_min`/`resources_max`/`resources_default`)
-> are held in memory only and are not persisted across a server restart yet.
+> Queue resource limits (`resources_min`/`resources_max`/`resources_default`) and
+> `max_queuable`/`max_running` are now persisted in the queue file and restored on
+> server restart.
 
 ## 4. Cloud / platform integration
 
