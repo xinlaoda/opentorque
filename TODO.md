@@ -290,8 +290,20 @@ rejected. Standard `qmove` can move a broader set of non-running states.
 > Live: `qsub -t 2-4` returned `187`, `qstat` showed `187[2]/[3]/[4]`, tasks ran
 > and completed, and `qdel <full-id>` removed them.
 
-### 3.4 `momctl` direct attribute query  [STUB]
-`momctl -q` is a placeholder; the underlying protocol query is unimplemented.
+### 3.4 `momctl` direct attribute query  [DONE - implemented & live-tested]
+`momctl -q` was a placeholder; the underlying protocol query was unimplemented.
+
+> **DONE (2026-08-06):** `momctl -q <attr>` now performs a real direct query to a
+> MOM daemon over the batch DIS protocol on the MOM service port (15002). Added
+> opcode `BatchMomStatus` (63) handled by a new `handleMomStatus` in the MOM,
+> which builds the node status via `server.BuildMomStatusAttrs` (shared with the
+> periodic IS status path) and returns the requested attribute value (text
+> reply) or the full sorted `key=value` dump for `-q all`; unknown attributes
+> return `15001`. Added unit tests `internal/mom/server/attrs_test.go`.
+> Live on `xxin-opentorque-srv` (new `pbs_mom` binary): `momctl -q ncpus` -> `2`,
+> `-q loadave` -> `0.02`, `-q state` -> `free`, `-q all` -> full sorted dump,
+> `-q notarealattr` -> clean `(code 15001)` error. Full `go test ./internal/...`
+> passes; job submission and cluster health unaffected.
 
 ---
 

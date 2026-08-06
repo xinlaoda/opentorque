@@ -14,6 +14,8 @@ import (
 	"net"
 	"os"
 	"time"
+
+	"github.com/xinlaoda/opentorque/internal/mom/dis"
 )
 
 const (
@@ -79,8 +81,7 @@ func main() {
 	}
 
 	if *query != "" {
-		fmt.Printf("MOM %s query '%s':\n", addr, *query)
-		fmt.Printf("  (Direct RM queries not yet implemented)\n")
+		runQuery(addr, *query)
 		return
 	}
 
@@ -94,4 +95,61 @@ func main() {
 	}
 
 	flag.Usage()
+}
+
+// runQuery issues a direct status query to the MOM daemon and prints the result.
+// It speaks the batch DIS protocol used by the MOM service port.
+func runQuery(addr, attr string) {
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "momctl: cannot connect to MOM at %s: %v\n", addr, err)
+		os.Exit(2)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+
+	w := dis.NewWriter(conn)
+	user := os.Getenv("USER")
+	if user == "" {
+		user = "root"
+	}
+	if err := dis.WriteRequestHeader(w, dis.BatchMomStatus, user); err != nil {
+		fmt.Fprintf(os.Stderr, "momctl: write request: %v\n", err)
+		os.Exit(1)
+	}
+	if err := w.WriteString(attr); err != nil {
+		fmt.Fprintf(os.Stderr, "momctl: write attribute: %v\n", err)
+		os.Exit(1)
+	}
+	if err := w.WriteUint(0); err != nil { // request extension (none)
+		fmt.Fprintf(os.Stderr, "momctl: write extension: %v\n", err)
+		os.Exit(1)
+	}
+	if err := w.Flush(); err != nil {
+		fmt.Fprintf(os.Stderr, "momctl: flush: %v\n", err)
+		os.Exit(1)
+	}
+
+	r := dis.NewReader(conn)
+	_, _ = r.ReadUint() // protocol
+	_, _ = r.ReadUint() // version
+	code, err := r.ReadInt()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "momctl: read reply: %v\n", err)
+		os.Exit(1)
+	}
+	_, _ = r.ReadInt() // auxcode
+	choice, _ := r.ReadUint()
+
+	if code != 0 {
+		fmt.Fprintf(os.Stderr, "momctl: error querying '%s' at %s (code %d)\n", attr, addr, code)
+		os.Exit(1)
+	}
+
+	value := ""
+	if choice == dis.ReplyChoiceText {
+		value, _ = r.ReadString()
+	}
+
+	fmt.Println(value)
 }

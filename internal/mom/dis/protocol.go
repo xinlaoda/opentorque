@@ -49,6 +49,7 @@ const (
 	BatchAsySignalJob  = 60
 	BatchAltAuthenUser = 61
 	BatchGpuCtrl       = 62
+	BatchMomStatus     = 63
 )
 
 // PBS Batch Reply Choice Types (must match libpbs.h BATCH_REPLY_CHOICE_*)
@@ -81,36 +82,36 @@ const (
 
 // Inter-MOM protocol commands
 const (
-	IMAllOkay       = 0
-	IMJoinJob       = 1
-	IMKillJob       = 2
-	IMSpawnTask     = 3
-	IMGetTasks      = 4
-	IMSignalTask    = 5
-	IMObitTask      = 6
-	IMPollJob       = 7
-	IMGetInfo       = 8
-	IMGetResc       = 9
-	IMAbortJob      = 10
-	IMGetTid        = 11
-	IMRadixAllOk    = 12
-	IMJoinJobRadix  = 13
-	IMKillJobRadix  = 14
-	IMFence         = 15
-	IMConnect       = 16
-	IMDisconnect    = 17
-	IMMax           = 18
-	IMError         = 99
+	IMAllOkay      = 0
+	IMJoinJob      = 1
+	IMKillJob      = 2
+	IMSpawnTask    = 3
+	IMGetTasks     = 4
+	IMSignalTask   = 5
+	IMObitTask     = 6
+	IMPollJob      = 7
+	IMGetInfo      = 8
+	IMGetResc      = 9
+	IMAbortJob     = 10
+	IMGetTid       = 11
+	IMRadixAllOk   = 12
+	IMJoinJobRadix = 13
+	IMKillJobRadix = 14
+	IMFence        = 15
+	IMConnect      = 16
+	IMDisconnect   = 17
+	IMMax          = 18
+	IMError        = 99
 )
 
 // Job States
 const (
-	JobStateTransit = 0
-	JobStateQueued  = 1
-	JobStateHeld    = 2
-	JobStateWaiting = 3
-	JobStateRunning = 4
-	JobStateExiting = 5
+	JobStateTransit  = 0
+	JobStateQueued   = 1
+	JobStateHeld     = 2
+	JobStateWaiting  = 3
+	JobStateRunning  = 4
+	JobStateExiting  = 5
 	JobStateComplete = 6
 )
 
@@ -154,6 +155,7 @@ func BatchRequestName(reqType int) string {
 		BatchAsySignalJob:  "AsyncSignalJob",
 		BatchStatusNode:    "StatusNode",
 		BatchModifyJob:     "ModifyJob",
+		BatchMomStatus:     "MomStatus",
 		BatchCheckpointJob: "CheckpointJob",
 	}
 	if name, ok := names[reqType]; ok {

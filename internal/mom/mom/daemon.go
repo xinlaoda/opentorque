@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,19 +24,19 @@ import (
 
 // Daemon is the main pbs_mom daemon.
 type Daemon struct {
-	cfg       *config.Config
-	jobMgr    *job.Manager
-	executor  *job.Executor
-	monitor   resource.Monitor
-	servers   []*server.Connection
-	listener  net.Listener
+	cfg        *config.Config
+	jobMgr     *job.Manager
+	executor   *job.Executor
+	monitor    resource.Monitor
+	servers    []*server.Connection
+	listener   net.Listener
 	rmListener net.Listener
 
-	shutdown  chan struct{}
-	wg        sync.WaitGroup
+	shutdown chan struct{}
+	wg       sync.WaitGroup
 
-	mu        sync.RWMutex
-	running   bool
+	mu      sync.RWMutex
+	running bool
 }
 
 // New creates a new MOM daemon.
@@ -273,6 +274,9 @@ func (d *Daemon) dispatchRequest(conn net.Conn, reader *dis.Reader, header *dis.
 
 	case dis.BatchStatusJob:
 		bodyOk = d.handleStatusJob(conn, reader, header)
+
+	case dis.BatchMomStatus:
+		bodyOk = d.handleMomStatus(conn, reader, header)
 
 	case dis.BatchHoldJob:
 		bodyOk = d.handleHoldJob(conn, reader, header)
@@ -830,6 +834,53 @@ func (d *Daemon) handleStatusJob(conn net.Conn, reader *dis.Reader, header *dis.
 	return true
 }
 
+// handleMomStatus answers a direct momctl -q attribute query. The attribute
+// name is read from the body; the reply is the attribute value (a text reply),
+// or the full key=value dump when attr is empty or "all".
+func (d *Daemon) handleMomStatus(conn net.Conn, reader *dis.Reader, header *dis.RequestHeader) bool {
+	attr, _ := reader.ReadString()
+	attr = strings.ToLower(strings.TrimSpace(attr))
+	log.Printf("[MOM] MomStatus query %q from %s", attr, conn.RemoteAddr())
+
+	status, err := d.monitor.GetNodeStatus()
+	if err != nil {
+		log.Printf("[MOM] MomStatus: cannot read node status: %v", err)
+		dis.SendErrorReply(conn, dis.PbsErrInternal, 0)
+		return true
+	}
+	hostname, _ := os.Hostname()
+	shortHost := strings.Split(hostname, ".")[0]
+	attrs := server.BuildMomStatusAttrs(status, shortHost)
+
+	if attr == "all" || attr == "" {
+		keys := make([]string, 0, len(attrs))
+		for k := range attrs {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		var sb strings.Builder
+		for i, k := range keys {
+			if i > 0 {
+				sb.WriteByte('\n')
+			}
+			sb.WriteString(k)
+			sb.WriteByte('=')
+			sb.WriteString(attrs[k])
+		}
+		dis.SendTextReply(conn, sb.String())
+		return true
+	}
+
+	val, ok := attrs[attr]
+	if !ok {
+		log.Printf("[MOM] MomStatus: unknown attribute %q", attr)
+		dis.SendErrorReply(conn, dis.PbsErrNoAttr, 0)
+		return true
+	}
+	dis.SendTextReply(conn, val)
+	return true
+}
+
 func (d *Daemon) handleHoldJob(conn net.Conn, reader *dis.Reader, header *dis.RequestHeader) bool {
 	jobID, _ := reader.ReadString()
 	log.Printf("[MOM] HoldJob %s", jobID)
@@ -1047,17 +1098,17 @@ func parseSize(s string) int64 {
 // readReqExtend reads and discards the request extension field.
 // Format: diswui(has_extend) [if non-zero: diswst(extend_string)]
 func readReqExtend(r *dis.Reader) error {
-hasExtend, err := r.ReadUint()
-if err != nil {
-return fmt.Errorf("read extend flag: %w", err)
-}
-if hasExtend != 0 {
-_, err = r.ReadString()
-if err != nil {
-return fmt.Errorf("read extend string: %w", err)
-}
-}
-return nil
+	hasExtend, err := r.ReadUint()
+	if err != nil {
+		return fmt.Errorf("read extend flag: %w", err)
+	}
+	if hasExtend != 0 {
+		_, err = r.ReadString()
+		if err != nil {
+			return fmt.Errorf("read extend string: %w", err)
+		}
+	}
+	return nil
 }
 
 // performStaging executes file staging operations (stagein or stageout).

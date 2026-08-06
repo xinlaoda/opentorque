@@ -20,8 +20,8 @@ import (
 
 // IS protocol constants (Inter-Server protocol for status updates)
 const (
-	ISProtocol    = 4
-	ISProtocolVer = 3
+	ISProtocol     = 4
+	ISProtocolVer  = 3
 	ISClusterAddrs = 2
 	ISUpdate       = 3
 	ISStatus       = 4
@@ -30,11 +30,11 @@ const (
 
 // Connection manages communication with a pbs_server.
 type Connection struct {
-	mu       sync.Mutex
-	cfg      *config.Config
-	monitor  resource.Monitor
-	host     string
-	port     int
+	mu         sync.Mutex
+	cfg        *config.Config
+	monitor    resource.Monitor
+	host       string
+	port       int
 	lastUpdate time.Time
 }
 
@@ -149,9 +149,9 @@ func (c *Connection) SendStatusUpdate() error {
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	r := dis.NewReader(conn)
 	// Reply format: diswsi(protocol) diswsi(version) diswsi(command) diswsi(status)
-	_, _ = r.ReadInt() // protocol
-	_, _ = r.ReadInt() // version
-	_, _ = r.ReadInt() // command
+	_, _ = r.ReadInt()            // protocol
+	_, _ = r.ReadInt()            // version
+	_, _ = r.ReadInt()            // command
 	replyStatus, _ := r.ReadInt() // status
 
 	c.lastUpdate = time.Now()
@@ -257,6 +257,20 @@ func (c *Connection) SendJobObit(jobID string, exitStatus int, resources map[str
 	return nil
 }
 
+// BuildMomStatusAttrs returns the MOM node status as a key->value map. It is
+// reused by handleMomStatus for direct momctl -q queries, keeping the query
+// output consistent with the periodic IS status updates buildStatusString emits.
+func BuildMomStatusAttrs(status *resource.NodeStatus, hostname string) map[string]string {
+	items := buildStatusString(status, hostname)
+	m := make(map[string]string, len(items))
+	for _, it := range items {
+		if i := strings.IndexByte(it, '='); i > 0 {
+			m[it[:i]] = it[i+1:]
+		}
+	}
+	return m
+}
+
 // buildStatusString creates the status attributes list.
 func buildStatusString(status *resource.NodeStatus, hostname string) []string {
 	items := make([]string, 0, 20)
@@ -325,22 +339,22 @@ func (c *Connection) connectWithAuth(addr string) (net.Conn, string, error) {
 // dialPrivileged connects to addr from a privileged local port (< 1024).
 // This is the legacy authentication method for PBS server.
 func dialPrivileged(addr string) (net.Conn, error) {
-for port := 1023; port >= 600; port-- {
-localAddr := &net.TCPAddr{Port: port}
-d := net.Dialer{
-LocalAddr: localAddr,
-Timeout:   10 * time.Second,
-}
-conn, err := d.Dial("tcp", addr)
-if err == nil {
-return conn, nil
-}
-if !strings.Contains(err.Error(), "address already in use") {
-return nil, err
-}
-}
-// Fall back to any port
-return net.DialTimeout("tcp", addr, 10*time.Second)
+	for port := 1023; port >= 600; port-- {
+		localAddr := &net.TCPAddr{Port: port}
+		d := net.Dialer{
+			LocalAddr: localAddr,
+			Timeout:   10 * time.Second,
+		}
+		conn, err := d.Dial("tcp", addr)
+		if err == nil {
+			return conn, nil
+		}
+		if !strings.Contains(err.Error(), "address already in use") {
+			return nil, err
+		}
+	}
+	// Fall back to any port
+	return net.DialTimeout("tcp", addr, 10*time.Second)
 }
 
 const (
