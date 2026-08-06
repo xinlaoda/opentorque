@@ -2489,8 +2489,14 @@ func (s *Server) formatNodeStatus(n *node.Node) dis.StatusObject {
 	add("np", strconv.Itoa(n.NumProcs))
 	add("ntype", "cluster")
 
-	// Include status info from MOM
+	// Include status info from MOM. The raw MOM "state" is intentionally not
+	// re-emitted: it is already folded into n.State (with admin flags preserved
+	// by applyStateString) and surfaced exactly once via StateName(), so the
+	// scheduler/clients see drain/excl/offline rather than a stale "free".
 	for k, v := range n.Status {
+		if k == "state" {
+			continue
+		}
 		add(k, v)
 	}
 
@@ -3156,8 +3162,12 @@ func (s *Server) applyNodeAttrs(n *node.Node, attrs []dis.SvrAttrl) {
 			switch strings.ToLower(a.Value) {
 			case "offline":
 				n.State |= node.StateOffline
-			case "free":
-				n.State &^= node.StateOffline
+			case "drain":
+				n.State |= node.StateDrain
+			case "excl", "e", "exclusive":
+				n.State |= node.StateExcl
+			case "free", "resume", "clear":
+				n.State &^= (node.StateOffline | node.StateDrain | node.StateExcl)
 			}
 		case "np":
 			fmt.Sscanf(a.Value, "%d", &n.NumProcs)

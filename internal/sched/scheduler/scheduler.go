@@ -647,6 +647,28 @@ func (it *jobIterator) nextFlat() *JobInfo {
 }
 
 // findNodeForJob selects the best available node for a job.
+// nodeSchedulable reports whether a node may accept new jobs. Free nodes are
+// schedulable; nodes that are draining, exclusive/offline/down/busy are not;
+// a node already running a job (job-exclusive) may still take more jobs if it
+// has free capacity.
+func nodeSchedulable(n *NodeInfo) bool {
+	if n.State == "free" {
+		return true
+	}
+	blocked := map[string]bool{"drain": true, "excl": true, "exclusive": true,
+		"offline": true, "down": true, "busy": true}
+	for _, tok := range strings.Split(n.State, ",") {
+		t := strings.TrimSpace(tok)
+		if blocked[t] {
+			return false
+		}
+		if t == "job-exclusive" {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Scheduler) findNodeForJob(sinfo *ServerInfo, jinfo *JobInfo) *NodeInfo {
 	cpuReq := jinfo.CPUReq
 	if cpuReq == 0 {
@@ -655,7 +677,7 @@ func (s *Scheduler) findNodeForJob(sinfo *ServerInfo, jinfo *JobInfo) *NodeInfo 
 
 	var candidates []*NodeInfo
 	for _, n := range sinfo.Nodes {
-		if n.State != "free" && !strings.Contains(n.State, "job-") {
+		if !nodeSchedulable(n) {
 			continue
 		}
 		// Host pinning: -l host=<node> restricts scheduling to that node.

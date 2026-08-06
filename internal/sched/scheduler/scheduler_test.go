@@ -11,6 +11,43 @@ func newTestScheduler() *Scheduler {
 	return New(config.DefaultConfig(""))
 }
 
+func TestFindNodeForJobSkipsDrain(t *testing.T) {
+	s := newTestScheduler()
+	sinfo := &ServerInfo{Nodes: []*NodeInfo{
+		{Name: "free1", State: "free", FreeCPUs: 2},
+		{Name: "draining", State: "drain", FreeCPUs: 2},
+		{Name: "drainjob", State: "drain,job-exclusive", FreeCPUs: 2},
+		{Name: "offline", State: "offline", FreeCPUs: 2},
+		{Name: "excl", State: "excl", FreeCPUs: 2},
+	}}
+	j := &JobInfo{ID: "1", CPUReq: 2}
+	got := s.findNodeForJob(sinfo, j)
+	if got == nil || got.Name != "free1" {
+		t.Fatalf("expected only free1 schedulable, got %+v", got)
+	}
+}
+
+func TestNodeSchedulable(t *testing.T) {
+	cases := []struct {
+		state string
+		want  bool
+	}{
+		{"free", true},
+		{"job-exclusive", true},
+		{"drain", false},
+		{"drain,job-exclusive", false},
+		{"excl", false},
+		{"offline", false},
+		{"down", false},
+		{"busy", false},
+	}
+	for _, c := range cases {
+		if got := nodeSchedulable(&NodeInfo{State: c.state}); got != c.want {
+			t.Errorf("nodeSchedulable(%q)=%v want %v", c.state, got, c.want)
+		}
+	}
+}
+
 func TestFindNodeForJobBestFit(t *testing.T) {
 	s := newTestScheduler()
 	sinfo := &ServerInfo{Nodes: []*NodeInfo{

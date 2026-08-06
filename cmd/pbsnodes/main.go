@@ -6,6 +6,7 @@
 //	pbsnodes -a          List all nodes
 //	pbsnodes -l          List down/offline nodes
 //	pbsnodes -o node     Mark node offline
+//	pbsnodes -D node     Drain node (no new jobs; let running finish)
 //	pbsnodes -c node     Clear offline/down status
 //	pbsnodes -r node     Reset node (clear offline)
 package main
@@ -25,6 +26,7 @@ func main() {
 		listAll     = flag.Bool("a", false, "List all nodes")
 		listDown    = flag.Bool("l", false, "List down/offline nodes")
 		markOffline = flag.Bool("o", false, "Mark node(s) offline")
+		markDrain   = flag.Bool("D", false, "Drain node(s) - no new jobs, let running finish")
 		clearNode   = flag.Bool("c", false, "Clear offline/down status")
 		resetNode   = flag.Bool("r", false, "Reset node (clear offline)")
 		quiet       = flag.Bool("q", false, "Quiet mode")
@@ -58,6 +60,18 @@ func main() {
 		}
 		for _, node := range flag.Args() {
 			attrs := []dis.SvrAttrl{{Name: "state", Value: "offline", Op: 1}}
+			if err := conn.Manager(dis.MgrCmdSet, dis.MgrObjNode, node, attrs); err != nil {
+				fmt.Fprintf(os.Stderr, "pbsnodes: %s: %v\n", node, err)
+			}
+		}
+
+	case *markDrain:
+		if flag.NArg() < 1 {
+			fmt.Fprintf(os.Stderr, "pbsnodes: no node specified\n")
+			os.Exit(1)
+		}
+		for _, node := range flag.Args() {
+			attrs := []dis.SvrAttrl{{Name: "state", Value: "drain", Op: 1}}
 			if err := conn.Manager(dis.MgrCmdSet, dis.MgrObjNode, node, attrs); err != nil {
 				fmt.Fprintf(os.Stderr, "pbsnodes: %s: %v\n", node, err)
 			}

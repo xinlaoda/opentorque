@@ -17,6 +17,8 @@ const (
 	StateJob     = 0x08 // Running a job
 	StateBusy    = 0x10 // Load too high
 	StateUnknown = 0x20 // Initial state before first contact
+	StateDrain   = 0x40 // No new jobs; let running jobs finish (roll-out)
+	StateExcl    = 0x80 // Exclusive / maintenance: block new jobs
 )
 
 // StateNames maps state flags to display strings for pbsnodes output.
@@ -28,6 +30,8 @@ var StateNames = map[int]string{
 	StateJob:     "job-exclusive",
 	StateBusy:    "busy",
 	StateUnknown: "state-unknown",
+	StateDrain:   "drain",
+	StateExcl:    "excl",
 }
 
 // Node represents a compute node (MOM) in the cluster.
@@ -99,6 +103,8 @@ func (n *Node) StateName() string {
 		{StateBusy, "busy"},
 		{StateJob, "job-exclusive"},
 		{StateReserve, "reserve"},
+		{StateDrain, "drain"},
+		{StateExcl, "excl"},
 		{StateUnknown, "state-unknown"},
 	}
 	for _, cf := range checkFlags {
@@ -117,6 +123,10 @@ func (n *Node) StateName() string {
 
 // IsFree returns true if the node can accept new jobs.
 func (n *Node) IsFree() bool {
+	// drain/excl nodes must not accept new jobs (drain lets running jobs finish).
+	if n.State&(StateDrain|StateExcl) != 0 {
+		return false
+	}
 	return n.State == StateFree && n.SlotsUsed < n.SlotsTotal
 }
 
@@ -196,7 +206,7 @@ func (n *Node) UpdateFromStatus(items []string) {
 // applyStateString parses a state string from MOM (e.g., "free", "busy").
 func (n *Node) applyStateString(s string) {
 	// Only apply MOM-reported state changes, preserve admin flags
-	adminFlags := n.State & (StateOffline | StateReserve)
+	adminFlags := n.State & (StateOffline | StateReserve | StateDrain | StateExcl)
 	switch s {
 	case "free":
 		n.State = StateFree | adminFlags

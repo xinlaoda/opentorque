@@ -416,16 +416,17 @@ is hard and cannot be bypassed.
 ## 4. Cloud / platform integration
 
 
-### 4.1 Cloud elasticity (dynamic node up/down by queue demand)  [GAP]
-No built-in cloud autoscaling: OpenTorque schedules against nodes that already
-exist. No burst/elastic node support (cf. Slurm `resume`/`suspend`, CycleCloud
-autoscale). See `docs/` analysis and the external design described in
-`opentorque-dynamic-scheduling-azure.md` (out of repo). Recommended as a new
-external "Fleet/Autoscale controller" plus drain/offline hooks.
+### 4.1 Cloud elasticity (dynamic node up/down by queue demand)  [DONE - implemented & live-tested]
+Dynamic node up/down by queue demand is implemented end-to-end by the
+event-driven Cloud Elastic Controller (CEC) + Azure CRP (see 4.4 / 4.4a-e):
+`NeedCapacity` triggers scale-out to new VMs, idle reclaim drives scale-in.
+The drain/offline hooks it relies on are 4.2 below.
 
-### 4.2 Node drain/roll-out primitive  [GAP]
-No convenience for draining a node before maintenance/scale-in (only manual
-`pbsnodes -o` + wait; no graceful `excl`/drain state).
+### 4.2 Node drain/roll-out primitive  [DONE - implemented & live-tested]
+A graceful drain state now exists (see 4.4f). `pbsnodes -D <node>` sets a
+`drain` state (no new jobs, running jobs finish); `pbsnodes -r <node>` resumes.
+`excl` is also supported. Both schedulers and the node-capacity snapshot
+honor drain/excl.
 
 ### 4.3 Cloud elastic node scaling (queue-driven)  [GAP] -- DESIGNED, NOT implemented
 Queue-defined burst/scale-in of cloud VMs. When a queue (or node group) carries
@@ -477,6 +478,27 @@ Concrete work items to build the event-driven cloud elasticity (per
   CEC event-loop with in-flight guard and cooldown; CRP adapter interface stubs
   (`ensure/describe/reclaim/resume/health`) that return `vmID` before boot.
   **[DONE -- implemented & integration-tested]** -- see 4.4a below.
+
+### 4.4f Node drain/roll-out primitive (4.2) - implementation + live test
+- New node admin states `drain` (no new jobs; running finish) and `excl`
+  (exclusive/maintenance) in `internal/node` (flags preserved by
+  `applyStateString` against MOM status updates). `pbsnodes -D <node>` drains,
+  `pbsnodes -r/<c>` resumes (also `qmgr set node <name> state=drain|excl|free`).
+- Both schedulers honor the state: the external scheduler's `nodeSchedulable`
+  skips drain/excl/offline/down/busy and `internal/server` builtin uses
+  `IsFree` (drain/excl excluded). `formatNodeStatus` now emits node state
+  exactly once from `StateName()` (admin-aware) instead of re-emitting the
+  raw MOM `state` (which previously masked drain and let the scheduler place
+  new jobs on a drained node).
+- Unit tests: `internal/node/drain_test.go` (drain/excl state, MOM free does
+  not clear drain, IsFree false), `TestFindNodeForJobSkipsDrain` and
+  `TestNodeSchedulable` in `internal/sched/scheduler/scheduler_test.go`.
+- Live (2026-08-06, srv): `pbsnodes -D xxin-opentorque-srv` -> node state
+  `drain`; submitting jobs while drained produced **zero** dispatches to srv
+  (scheduler placed on w1 only, per sched log); `pbsnodes -r xxin-opentorque-srv`
+  -> srv immediately accepted jobs again (212/213 dispatched to srv). During
+  the shortfall the CEC auto-scaled a VM (`ot-node-8armcZ7L`), confirming 4.1
+  dynamic elasticity, and destroyed the orphan when the job left the queue.
 
 ### 4.4a M1 test results (integration, RG `xxin-opentorque-test`, westus3)
 Validated live against the M1 stub CRP (`azure`) running inside `pbs_sched`:
