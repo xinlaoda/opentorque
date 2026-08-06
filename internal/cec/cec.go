@@ -106,6 +106,11 @@ type Pool struct {
 	// and IdleSince for >= IdleTime.
 	IdleSince map[string]time.Time
 
+	// Hibernated tracks deallocated/hibernated VMs kept for fast resume
+	// (vmID -> when suspended). The VM is retained (not destroyed) so the next
+	// scale-out can Resume it quickly instead of re-provisioning + cloud-init.
+	Hibernated map[string]time.Time
+
 	CooldownUntil time.Time
 	LastScale     time.Time
 
@@ -194,6 +199,7 @@ func (c *Controller) ensurePool(ev Event) *Pool {
 			Owned:         make(map[string]bool),
 			IdleSince:     make(map[string]time.Time),
 			LastReclaim:   make(map[string]time.Time),
+			Hibernated:    make(map[string]time.Time),
 		}
 		c.pools[ev.Queue] = p
 	}
@@ -372,6 +378,10 @@ func (c *Controller) reclaimNodeLocked(qname string, p *Pool, name string, now t
 	if p.Running > 0 {
 		p.Running--
 	}
+	if policy == "hibernate" && !destroy {
+		p.Hibernated[name] = now
+		log.Printf("[CEC] queue=%s hibernated node %s for fast resume (running=%d)", qname, name, p.Running)
+	}
 	log.Printf("[CEC] queue=%s reclaimed node %s, running=%d", qname, name, p.Running)
 }
 
@@ -430,6 +440,41 @@ func (c *Controller) handleCapacity(ev Event) {
 	}
 	p.LastScale = now
 	p.CooldownUntil = now.Add(cd)
+
+	// Hibernate fast-resume: restore previously hibernated VMs in this pool
+	// before provisioning brand-new ones (avoids re-provision + cloud-init
+	// bootstrap; the VM and its OS disk are retained). Resumed VMs re-enter
+	// Provisioning and are consumed by RegisterNodesUp when the MOM re-registers.
+	resumed := 0
+	for resumed < need && len(p.Hibernated) > 0 {
+		var id string
+		var suspendAt time.Time
+		for vmID, t := range p.Hibernated {
+			if id == "" || t.Before(suspendAt) {
+				id, suspendAt = vmID, t
+			}
+		}
+		delete(p.Hibernated, id)
+		var jobID string
+		if resumed < len(ev.Jobs) {
+			jobID = ev.Jobs[resumed].ID
+		}
+		p.Provisioning[id] = jobID
+		p.ProvisionedAt[id] = now
+		p.Inflight++
+		if err := c.provider.Resume(crp.VMRef{Provider: p.Provider, VMID: id}); err != nil {
+			log.Printf("[CEC] queue=%s resume hibernated vm=%s failed: %v", ev.Queue, id, err)
+		} else {
+			log.Printf("[CEC] queue=%s resuming hibernated vm=%s -> job=%s (fast path)", ev.Queue, id, jobIDOr(jobID, "(unbound)"))
+		}
+		resumed++
+	}
+	need -= resumed
+
+	if need <= 0 {
+		log.Printf("[CEC] queue=%s shortfall met by resuming %d hibernated VM(s), inflight=%d", ev.Queue, resumed, p.Inflight)
+		return
+	}
 
 	log.Printf("[CEC] queue=%s scaling OUT by %d (target=%d running=%d inflight=%d) cores_shortfall=%d blocked=%d",
 		ev.Queue, need, target, p.Running, p.Inflight, ev.Shortfall.Cores, ev.Shortfall.Blocked)

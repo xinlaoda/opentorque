@@ -202,6 +202,11 @@ func (a *AzureCRP) Ensure(req EnsureRequest) ([]VM, error) {
 		vmID, err := a.createVM(req, vmName, nicID)
 		if err != nil {
 			log.Printf("[AzureCRP] createVM %s failed: %v", vmName, err)
+			// The NIC was already created for this VM; Azure does not cascade
+			// it, so remove it now to avoid orphaning the interface.
+			if derr := a.deleteWithRetry(nicID); derr != nil {
+				log.Printf("[AzureCRP] cleanup NIC %s after createVM failure: %v", nicName, derr)
+			}
 			continue
 		}
 
@@ -244,7 +249,7 @@ func (a *AzureCRP) createNIC(req EnsureRequest, nicName, vmName string) (string,
 				{
 					"name": "ipconfig1",
 					"properties": map[string]any{
-						"subnet": map[string]string{"id": req.SubnetID},
+						"subnet":                    map[string]string{"id": req.SubnetID},
 						"privateIPAllocationMethod": "Dynamic",
 					},
 				},
@@ -312,12 +317,11 @@ func (a *AzureCRP) createVM(req EnsureRequest, vmName, nicID string) (string, er
 	}
 
 	hardwareProfile := map[string]any{"vmSize": req.SKU}
-	if req.Hibernate {
-		// hibernationEnabled must be set at VM creation; Azure then auto-
-		// hibernates on deallocate for supported SKUs/OS images.
-		hardwareProfile["hibernationEnabled"] = true
-	}
-
+	// Azure VM hibernation (hibernationEnabled) is an opt-in capability that
+	// requires a hibernation-capable SKU, which the default Dsv3 pool SKU is
+	// not. The CEC "hibernate" reclaim policy still achieves fast resume by
+	// retaining the deallocated VM and later POST /start-ing it, so no
+	// capability flag is set on the create body.
 	body := map[string]any{
 		"location": req.Location,
 		"properties": map[string]any{
@@ -339,8 +343,8 @@ func (a *AzureCRP) createVM(req EnsureRequest, vmName, nicID string) (string, er
 				"customData": base64.StdEncoding.EncodeToString([]byte(customData)),
 			},
 			"storageProfile": map[string]any{
-				"imageReference":  imageVal,
-				"osDisk":          osDisk,
+				"imageReference": imageVal,
+				"osDisk":         osDisk,
 			},
 			"networkProfile": map[string]any{
 				"networkInterfaces": []map[string]string{

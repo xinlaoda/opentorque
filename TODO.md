@@ -566,7 +566,7 @@ end-to-end against live Azure** (subscription `a04b47d2-...`). Key results:
 
 - **M3** — event-driven scale-in: observe `NodeFree` → idle window →
   drain → deregister → `deallocate`/`hibernate`; fast `resume` for hibernate;
-  provisioning timeout + `qdel`-during-provisioning cleanup (§12.2). **[DONE -- implemented & integration-tested]** -- see 4.4c below. (hibernate/resume fast path + provisioning timeout remain stubs; only deallocate exercised live.)
+  provisioning timeout + `qdel`-during-provisioning cleanup (§12.2). **[DONE -- implemented & integration-tested]** -- see 4.4c below. (hibernate/resume fast path + provisioning timeout are also now implemented and live-verified -- see 4.4c.)
 
 ### 4.4c M3 scale-in implementation + live test results (RG xxin-opentorque-test, westus3)
 M3 event-driven scale-in is now implemented and verified end-to-end (commits
@@ -591,9 +591,38 @@ dynamic VM, then idle-time-based drain/deregister/deallocate all ran live:
   PowerState/deallocated, Running decremented to 0, node dropped from Owned.
 - Cleanup/state: test VM deallocated and deleted; orphaned M2 VM removed;
   cloud_idle_time restored to 300. Final node list: w1, srv only.
-- Remaining stubs: cloud_reclaim=hibernate fast-resume and provisioning-timeout
-  (qdel-during-provisioning) cleanup are not yet exercised; only deallocate is
-  live-verified.
+- cloud_reclaim=hibernate fast-resume: IMPLEMENTED + live-verified (2026-08-06,
+  RG xxin-opentorque-test, westus3). CEC now keeps a deallocated ("hibernated")
+  VM for fast resume instead of destroying it, and the next scale-out resumes it
+  via provider.Resume (POST /start) rather than re-provisioning a fresh VM:
+    - Code: Pool.Hibernated map + ensurePool init; reclaimNodeLocked adds the
+      node to Hibernated under policy= hibernate (retain, not destroy);
+      handleCapacity resumes hibernated VMs first (push into Provisioning,
+      Inflight++, provider.Resume) before provisioning new ones. Tests
+      TestHibernateReclaimKeepsVM / TestHibernateFastResume in cec_test.go.
+    - Live cycle observed in sched log: scale-out created ot-node-cOG4VhDG
+      (Standard_D2s_v3) -> ran jobs -> idle 45s -> [CEC] reclaiming idle node
+      ... (policy=hibernate) -> hibernated node ... for fast resume (VM kept,
+      PowerState/deallocated) -> new overflow -> [CEC] resuming hibernated
+      vm=ot-node-cOG4VhDG -> job=... (fast path) -> VM PowerState/running ->
+      job ran. No new VM was provisioned on the fast path.
+    - Azure hibernation capability: createVM no longer sets the Azure
+      `hibernationEnabled` hardware flag -- that requires a hibernation-
+      capable SKU which the default Dsv3 pool SKU (Standard_D2s_v3) is not,
+      and it caused HTTP 400 BadRequest on create. Fast resume is delivered by
+      retaining the deallocated VM + POST /start, which works on any SKU.
+- provisioning-timeout (qdel-during-provisioning) cleanup: IMPLEMENTED +
+  live-verified (2026-08-06, same RG). Code: sweepProvisioningTimeoutLocked
+  (running under the reclaim ticker) destroys any Provisioning VM whose bound
+  job is no longer queued or running; SyncQueuedJobs qdel-during-provisioning
+  orphan destroy. Tests TestProvisioningTimeout in cec_test.go. Live: with
+  cloud_provision_timeout=15 an overflowing job triggered scale-out and the
+  still-booting VM (ot-node-p5Z4iO9q) was destroyed ~15s later; zero orphan
+  VMs/NICs remained in the RG.
+- createVM-failure NIC cleanup: Ensure now deletes the just-created NIC when
+  createVM fails, so a failed create no longer orphans network interfaces
+  (found and fixed during the hibernate live test; the 7 orphaned ot-node-*-nic
+  already in the RG were manually deleted).
 - Destroy-path resource cleanup (verified end-to-end live 2026-08-05): when
   scale-in reclaims with destroy=true (VM deleted rather than deallocated),
   provider.Reclaim now deletes the VM's attached NICs and any public IPs so

@@ -15,6 +15,7 @@ type fakeProvider struct {
 	ensures    int
 	lastReq    crp.EnsureRequest
 	reclaimErr error
+	resumes    []string
 }
 
 func (f *fakeProvider) Name() string { return "fake" }
@@ -33,7 +34,12 @@ func (f *fakeProvider) Describe(ref crp.VMRef) (crp.VM, error) { return crp.VM{}
 func (f *fakeProvider) Reclaim(ref crp.VMRef, policy string, destroy bool) error {
 	return f.reclaimErr
 }
-func (f *fakeProvider) Resume(ref crp.VMRef) error { return nil }
+func (f *fakeProvider) Resume(ref crp.VMRef) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resumes = append(f.resumes, ref.VMID)
+	return nil
+}
 func (f *fakeProvider) Health(ref crp.VMRef) error { return nil }
 
 type fakeNodes struct {
@@ -175,5 +181,114 @@ func TestDrainTimeoutRateLimit(t *testing.T) {
 	fn.mu.Unlock()
 	if d2 != 1 {
 		t.Fatalf("second sweep within drain timeout should not re-attempt, drained=%d", d2)
+	}
+}
+
+// TestHibernateReclaimKeepsVM verifies that reclaiming an idle node with the
+// "hibernate" policy keeps the VM for fast resume (added to Pool.Hibernated)
+// instead of destroying it, and decrements Running.
+func TestHibernateReclaimKeepsVM(t *testing.T) {
+	fp := &fakeProvider{}
+	fn := &fakeNodes{}
+	c := New(fp)
+	c.nodes = fn
+	now := time.Now()
+	c.mu.Lock()
+	c.pools["q"] = &Pool{
+		IdleTime:    time.Second,
+		Reclaim:     "hibernate",
+		Running:     2,
+		MinNodes:    0,
+		Owned:       map[string]bool{"hv": true},
+		IdleSince:   map[string]time.Time{"hv": now.Add(-5 * time.Second)},
+		Hibernated:  map[string]time.Time{},
+		LastReclaim: map[string]time.Time{},
+	}
+	c.mu.Unlock()
+
+	c.reclaimIdle()
+
+	c.mu.Lock()
+	_, kept := c.pools["q"].Hibernated["hv"]
+	running := c.pools["q"].Running
+	c.mu.Unlock()
+	if !kept {
+		t.Fatalf("hibernate-reclaimed VM not kept in Hibernated")
+	}
+	if running != 1 {
+		t.Fatalf("running after hibernate reclaim = %d, want 1", running)
+	}
+}
+
+// TestHibernateFastResume verifies a capacity event resumes a hibernated VM
+// (fast path) instead of provisioning a brand-new one, so no Ensure call is
+// made when hibernated capacity covers the shortfall.
+func TestHibernateFastResume(t *testing.T) {
+	fp := &fakeProvider{}
+	fn := &fakeNodes{}
+	c := New(fp)
+	c.nodes = fn
+	now := time.Now()
+	c.mu.Lock()
+	c.pools["q"] = &Pool{
+		Reclaim:       "hibernate",
+		MaxNodes:      5,
+		Provisioning:  map[string]string{},
+		ProvisionedAt: map[string]time.Time{},
+		Hibernated:    map[string]time.Time{"hv": now.Add(-time.Minute)},
+	}
+	c.mu.Unlock()
+
+	ev := capEvent("q", 1, 2, 1, JobDemand{ID: "j1"})
+	ev.Reclaim = "hibernate"
+	c.handle(ev)
+
+	fp.mu.Lock()
+	nres := len(fp.resumes)
+	nes := fp.ensures
+	fp.mu.Unlock()
+	if nres != 1 {
+		t.Fatalf("resumes = %d, want 1", nres)
+	}
+	if nes != 0 {
+		t.Fatalf("ensures = %d, want 0 (resume-first should cover shortfall)", nes)
+	}
+	fp.mu.Lock()
+	resumedID := fp.resumes[0]
+	fp.mu.Unlock()
+	if resumedID != "hv" {
+		t.Fatalf("resumed vm = %q, want hv", resumedID)
+	}
+}
+
+// TestProvisioningTimeout verifies a still-booting VM that exceeds the pool
+// provisioning timeout is destroyed and removed from Provisioning.
+func TestProvisioningTimeout(t *testing.T) {
+	fp := &fakeProvider{}
+	fn := &fakeNodes{}
+	c := New(fp)
+	c.nodes = fn
+	now := time.Now()
+	c.mu.Lock()
+	c.pools["q"] = &Pool{
+		Provisioning:     map[string]string{"pv": "j1"},
+		ProvisionedAt:    map[string]time.Time{"pv": now.Add(-time.Hour)},
+		ProvisionTimeout: 10 * time.Minute,
+		Inflight:         1,
+		Hibernated:       map[string]time.Time{},
+	}
+	c.mu.Unlock()
+
+	c.reclaimIdle()
+
+	c.mu.Lock()
+	_, still := c.pools["q"].Provisioning["pv"]
+	inf := c.pools["q"].Inflight
+	c.mu.Unlock()
+	if still {
+		t.Fatalf("timed-out provisioning VM still in Provisioning")
+	}
+	if inf != 0 {
+		t.Fatalf("inflight after timeout destroy = %d, want 0", inf)
 	}
 }
