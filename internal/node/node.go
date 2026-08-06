@@ -51,14 +51,15 @@ type Node struct {
 	SlotsUsed    int      // Currently used slots
 
 	// Health tracking
-	LastUpdate      time.Time // Last status update received
-	LastHeardFrom   time.Time // Last successful contact
-	FailCount       int       // Consecutive failure count
-	PowerState      string    // Power state string
+	LastUpdate    time.Time // Last status update received
+	LastHeardFrom time.Time // Last successful contact
+	FailCount     int       // Consecutive failure count
+	PowerState    string    // Power state string
 
 	// Properties and features
 	Properties []string // Node properties (for node selection)
 	Note       string   // Administrator note
+	Queue      string   // optional pool/queue ownership (per-pool free-cores)
 
 	// Attributes (generic)
 	Attrs map[string]string
@@ -212,9 +213,9 @@ func (n *Node) applyStateString(s string) {
 
 // Manager tracks all compute nodes in the cluster.
 type Manager struct {
-	mu    sync.RWMutex
-	nodes map[string]*Node
-	byID  map[int]*Node
+	mu     sync.RWMutex
+	nodes  map[string]*Node
+	byID   map[int]*Node
 	nextID int
 }
 

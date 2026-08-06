@@ -588,12 +588,10 @@ dynamic VM, then idle-time-based drain/deregister/deallocate all ran live:
   orphaned ot-node-* NICs in the test RG were manually cleaned up.
 
 - **M4** — cooldown tuning, shortfall headroom, `NeedCapacity` merge/coalesce,
-  drain timeout policy. **[DONE -- implemented & live-tested]** (see 4.4d) --
-  surface per-pool free-cores via a status RPC remains a follow-up (extends the
-  `qstat -B` gap in 2.9).
+  drain timeout policy **[DONE -- implemented & live-tested]**, and the
+  per-pool free-cores status RPC in `qstat -B` (2.9 remainder) **[DONE -- see 4.4e]**.
 - Blockers (design §11): multi-node jobs (1.4) affect shortfall math; jobs
-  larger than one SKU node cannot be placed; expose per-queue free cores
-  snapshot remains open.
+  larger than one SKU node cannot be placed.
 
 ### 4.4d M4 implementation + live test results (RG xxin-opentorque-test, westus3)
 M4 adds the queue tuning knobs and CEC elasticity refinements:
@@ -621,6 +619,27 @@ M4 adds the queue tuning knobs and CEC elasticity refinements:
   vs VM (go1.22.12).
 
 ---
+
+### 4.4e Per-pool free-cores snapshot in `qstat -B` (M4 follow-up)
+Implemented the per-queue/per-pool capacity snapshot (design §13 'Per-queue/SKU
+free cores snapshot API'; was the M4 follow-up). Nodes now carry an optional
+`queue` (pool) ownership set via `qmgr set node <name> queue=<q>` and persisted in
+`server_priv/nodes`. `pbs_server` aggregates each pool's running node count and
+total/free cores into the server status, surfaced by `qstat -B -f`:
+- New server status attrs (one entry per pool, keyed by queue name):
+  `pool_nodes`, `pool_up_nodes`, `pool_total_cores`, `pool_free_cores`.
+  Nodes with no ownership fall into a `default` pool; down/offline nodes are
+  excluded from up/free counts.
+- New code: `internal/node` `Node.Queue`; `internal/server` `applyNodeAttrs`
+  (`queue`), `saveNodes`/`recoverNodes` (persist/restore), and the per-pool
+  aggregation in `formatServerStatus`. Unit test `TestPoolFreeCoresSnapshot`
+  (`internal/server/poolsnapshot_test.go`).
+- Live (2026-08-06, srv): set `queue=batch` on `xxin-opentorque-srv`/`w1`
+  (np=2 each). `qstat -B -f` showed `pool_total_cores.batch=4,
+  pool_free_cores.batch=4, pool_up_nodes.batch=2`; running an `ncpus=2` job
+  dropped `pool_free_cores.batch` to 2 and it returned to 4 after `qdel`.
+  Ownership persisted across a real server restart. All changed files
+  byte-match local vs VM (go1.22.12).
 
 ## 5. High availability & robustness
 

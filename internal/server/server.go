@@ -2763,6 +2763,43 @@ func (s *Server) formatServerStatus() dis.StatusObject {
 	addIntNZ("tcp_incoming_timeout", s.cfg.TCPIncomingTimeout)
 	addIntNZ("job_full_report_time", s.cfg.JobFullReportTime)
 
+	// Per-pool (per-queue) free-cores snapshot (M4 follow-up): aggregate nodes
+	// by their owning queue and expose running node count + total/free cores so
+	// CEC/operators can inspect capacity without parsing pbsnodes output.
+	poolNodes := map[string]int{}
+	poolUp := map[string]int{}
+	poolCores := map[string]int{}
+	poolFree := map[string]int{}
+	for _, n := range s.nodeMgr.AllNodes() {
+		n.Mu.RLock()
+		pool := n.Queue
+		if pool == "" {
+			pool = "default"
+		}
+		poolNodes[pool]++
+		if n.State&(node.StateDown|node.StateOffline) == 0 {
+			poolUp[pool]++
+			poolCores[pool] += n.SlotsTotal
+			free := n.SlotsTotal - n.SlotsUsed
+			if free < 0 {
+				free = 0
+			}
+			poolFree[pool] += free
+		}
+		n.Mu.RUnlock()
+	}
+	strI := func(m map[string]int) map[string]string {
+		out := make(map[string]string, len(m))
+		for k, v := range m {
+			out[k] = strconv.Itoa(v)
+		}
+		return out
+	}
+	addResc("pool_nodes", strI(poolNodes))
+	addResc("pool_up_nodes", strI(poolUp))
+	addResc("pool_total_cores", strI(poolCores))
+	addResc("pool_free_cores", strI(poolFree))
+
 	return dis.StatusObject{Type: dis.MgrObjServer, Name: s.cfg.ServerName, Attrs: attrs}
 }
 
@@ -3129,6 +3166,8 @@ func (s *Server) applyNodeAttrs(n *node.Node, attrs []dis.SvrAttrl) {
 			n.Properties = strings.Split(a.Value, ",")
 		case "note":
 			n.Note = a.Value
+		case "queue":
+			n.Queue = a.Value
 		default:
 			n.Attrs[a.Name] = a.Value
 		}
@@ -4541,12 +4580,19 @@ func (s *Server) recoverNodes() {
 		}
 		nodeName := parts[0]
 		np := 1
+		qname := ""
 		for _, p := range parts[1:] {
 			if strings.HasPrefix(p, "np=") {
 				fmt.Sscanf(p[3:], "%d", &np)
 			}
+			if strings.HasPrefix(p, "queue=") {
+				qname = p[len("queue="):]
+			}
 		}
-		s.nodeMgr.AddNode(nodeName, np)
+		nn := s.nodeMgr.AddNode(nodeName, np)
+		if qname != "" {
+			nn.Queue = qname
+		}
 	}
 }
 
@@ -4946,7 +4992,11 @@ func (s *Server) saveNodes() {
 	var sb strings.Builder
 	for _, n := range s.nodeMgr.AllNodes() {
 		n.Mu.RLock()
-		sb.WriteString(fmt.Sprintf("%s np=%d\n", n.Name, n.NumProcs))
+		if n.Queue != "" {
+			sb.WriteString(fmt.Sprintf("%s np=%d queue=%s\n", n.Name, n.NumProcs, n.Queue))
+		} else {
+			sb.WriteString(fmt.Sprintf("%s np=%d\n", n.Name, n.NumProcs))
+		}
 		n.Mu.RUnlock()
 	}
 	tmpFile := s.cfg.NodesFile + ".new"
