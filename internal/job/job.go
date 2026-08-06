@@ -3,6 +3,7 @@ package job
 
 import (
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -201,6 +202,84 @@ func (j *Job) FormatResourceUsed() map[string]string {
 		result["walltime"] = fmt.Sprintf("%02d:%02d:%02d", h, m, s)
 	}
 	return result
+}
+
+
+// CloneForArray returns a copy of the job for one element of a job array
+// (TODO 3.3). The copy carries the same script/attrs/resources but a fresh
+// identity/state and a single-index JobArrayReq so it behaves like a normal
+// queued job elsewhere. The returned job is NOT registered with any manager.
+func (j *Job) CloneForArray(index int, server string) *Job {
+	c := &Job{
+		ID:           j.ID,
+		Name:         j.Name,
+		Owner:        j.Owner,
+		Queue:        j.Queue,
+		Server:       j.Server,
+		HashName:     j.HashName,
+		State:        StateTransit,
+		Substate:     SubstateTransitQ,
+		ExecHost:     j.ExecHost,
+		ExecPort:     j.ExecPort,
+		SessionID:    j.SessionID,
+		ExitStatus:   j.ExitStatus,
+		CreateTime:   time.Now(),
+		Script:       j.Script,
+		ScriptFile:   j.ScriptFile,
+		ScriptArgs:   j.ScriptArgs,
+		StdoutPath:   j.StdoutPath,
+		StderrPath:   j.StderrPath,
+		JoinPath:     j.JoinPath,
+		Checkpoint:   j.Checkpoint,
+		EUser:        j.EUser,
+		EGroup:       j.EGroup,
+		Shell:        j.Shell,
+		UserList:     j.UserList,
+		Account:      j.Account,
+		KeepFiles:    j.KeepFiles,
+		FaultTolerant: j.FaultTolerant,
+		JobRadix:     j.JobRadix,
+		ReqVersion:   j.ReqVersion,
+		Priority:     j.Priority,
+		Rerunnable:   j.Rerunnable,
+		MailPoints:   j.MailPoints,
+		MailUsers:    j.MailUsers,
+		Comment:      j.Comment,
+		DependList:   j.DependList,
+		StageinList:  j.StageinList,
+		StageoutList: j.StageoutList,
+		GroupList:    j.GroupList,
+		JobArrayReq:  strconv.Itoa(index),
+		InitWorkDir:  j.InitWorkDir,
+		RootDir:      j.RootDir,
+		NodeCount:    j.NodeCount,
+		TaskCount:    j.TaskCount,
+		NeedNodes:    j.NeedNodes,
+		ProvisionVM:  j.ProvisionVM,
+		ProvisionNode: j.ProvisionNode,
+		Modified:     true,
+		FromRoute:    j.FromRoute,
+		HoldTypes:    j.HoldTypes,
+		Interactive:  j.Interactive,
+	}
+	c.ResourceReq = make(map[string]string, len(j.ResourceReq))
+	for k, v := range j.ResourceReq {
+		c.ResourceReq[k] = v
+	}
+	c.ResourceUsed = make(map[string]string, len(j.ResourceUsed))
+	for k, v := range j.ResourceUsed {
+		c.ResourceUsed[k] = v
+	}
+	c.Attrs = make(map[string]string, len(j.Attrs))
+	for k, v := range j.Attrs {
+		c.Attrs[k] = v
+	}
+	c.VariableList = make(map[string]string, len(j.VariableList))
+	for k, v := range j.VariableList {
+		c.VariableList[k] = v
+	}
+	c.Server = server
+	return c
 }
 
 // SetState transitions the job to a new state, updating timestamps accordingly.

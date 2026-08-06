@@ -265,8 +265,17 @@ execution job and runs directly in that queue (verified live: job ran in
 (`15004`). Standard `qmove` can move a broader set of states (operator
 permission permitting).
 
-### 3.3 Job arrays (`qsub -t`)  [GAP]
+### 3.3 Job arrays (`qsub -t`)  [DONE - implemented & live-tested]
 `-t 1-3` is accepted but never expanded into sub-jobs; it runs as a single job.
+
+> **DONE (2026-08-05):** `qsub -t` now expands the array spec into per-index
+> task sub-jobs (`N[1].srv`, `N[2].srv`, ...). `internal/server/server.go`
+> gained `parseArraySpec` (ranges, steps, comma lists), `CloneForArray` in
+> `internal/job/job.go`, and `processJobArray`/`commitJobInstance` wired into
+> both commit paths (auto-commit + 2-phase). Each task is routed/admitted and
+> saved independently; the whole submission rolls back if any task is rejected.
+> Live: `qsub -t 2-4` returned `187`, `qstat` showed `187[2]/[3]/[4]`, tasks ran
+> and completed, and `qdel <full-id>` removed them.
 
 ### 3.4 `momctl` direct attribute query  [STUB]
 `momctl -q` is a placeholder; the underlying protocol query is unimplemented.

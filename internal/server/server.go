@@ -665,51 +665,25 @@ func (s *Server) handleJobScript(conn net.Conn, r *dis.Reader, hdr *dis.RequestH
 
 	// Auto-commit for "2" protocol variant (QueueJob2/JobScript2/Commit2)
 	if autoCommit {
-		s.setDefaultOutputPaths(j)
-
-		// Transition via manager to update state counters
-		s.jobMgr.UpdateJobState(jobID, job.StateQueued, job.SubstateQueued)
-
-		// Route queue -> destination and run the admission gate (TODO 3.1/3.7).
-		// Reject the job if no destination accepts it.
-		if err := s.finalizeRoute(j, j.Owner); err != nil {
-			log.Printf("[SERVER] Job %s rejected: %v", jobID, err)
+		expanded, aerr := s.processJobArray(j, j.Owner)
+		if aerr != nil {
+			log.Printf("[SERVER] Job %s rejected: %v", jobID, aerr)
 			s.jobMgr.RemoveJob(jobID)
 			os.Remove(filepath.Join(s.cfg.JobsDir, jobID+".SC"))
 			dis.SendErrorReply(conn, dis.PbsePerm, 0)
 			return false
 		}
-
-		// Apply hold or deferred execution after initial state transition
-		j.Mu.RLock()
-		holdTypes := j.HoldTypes
-		execTime := j.ExecutionTime
-		queueName := j.Queue
-		j.Mu.RUnlock()
-
-		if holdTypes != "" && holdTypes != "n" {
-			s.jobMgr.UpdateJobState(jobID, job.StateHeld, job.SubstateHeld)
-		} else if !execTime.IsZero() && execTime.After(time.Now()) {
-			s.jobMgr.UpdateJobState(jobID, job.StateWaiting, job.SubstateWaiting)
+		if !expanded {
+			if err := s.commitJobInstance(j, j.Owner); err != nil {
+				log.Printf("[SERVER] Job %s rejected: %v", jobID, err)
+				s.jobMgr.RemoveJob(jobID)
+				os.Remove(filepath.Join(s.cfg.JobsDir, jobID+".SC"))
+				dis.SendErrorReply(conn, dis.PbsePerm, 0)
+				return false
+			}
+			log.Printf("[SERVER] Auto-committed job %s to queue %s", jobID, j.Queue)
 		}
-
-		if q := s.queueMgr.GetQueue(queueName); q != nil {
-			q.IncrJobCount(job.StateQueued)
-		}
-		s.saveJob(j)
-		log.Printf("[SERVER] Auto-committed job %s to queue %s", jobID, j.Queue)
-
-		// Write Q (queued) accounting record
-		if s.acctLog != nil {
-			j.Mu.RLock()
-			info := s.buildJobInfo(j)
-			j.Mu.RUnlock()
-			s.acctLog.RecordQueued(jobID, info)
-		}
-		// Signal the scheduler: a newly queued job is ready to dispatch.
-		s.triggerSched()
 	}
-
 	dis.SendOkReply(conn)
 	return true
 }
@@ -724,6 +698,129 @@ func (s *Server) handleRdytoCommit(conn net.Conn, r *dis.Reader, hdr *dis.Reques
 	}
 	dis.SendJobIDReply(conn, dis.ReplyChoiceRdytoCom, jobID)
 	return true
+}
+
+// parseArraySpec expands a TORQUE job-array spec ("1-3", "1,3,5", "5", "2-4:2")
+// into a sorted, de-duplicated list of indices (TODO 3.3).
+func parseArraySpec(spec string) ([]int, error) {
+	var out []int
+	seen := map[int]bool{}
+	addRange := func(lo, hi, step int) {
+		if step <= 0 {
+			step = 1
+		}
+		if lo > hi {
+			lo, hi = hi, lo
+		}
+		for v := lo; v <= hi; v += step {
+			if !seen[v] {
+				seen[v] = true
+				out = append(out, v)
+			}
+		}
+	}
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		var lo, hi, step int
+		if n, err := fmt.Sscanf(part, "%d-%d:%d", &lo, &hi, &step); err == nil && n == 3 {
+			addRange(lo, hi, step)
+			continue
+		}
+		if n, err := fmt.Sscanf(part, "%d-%d", &lo, &hi); err == nil && n == 2 {
+			addRange(lo, hi, 1)
+			continue
+		}
+		if n, err := fmt.Sscanf(part, "%d", &lo); err == nil && n == 1 {
+			addRange(lo, lo, 1)
+			continue
+		}
+		return nil, fmt.Errorf("invalid array spec %q", part)
+	}
+	sort.Ints(out)
+	return out, nil
+}
+
+// commitJobInstance queues and admits a single job (used both for a plain job
+// and for each job-array element). Assumes j is already registered in the job
+// manager with its Script/.SC set.
+func (s *Server) commitJobInstance(j *job.Job, owner string) error {
+	s.setDefaultOutputPaths(j)
+	s.jobMgr.UpdateJobState(j.ID, job.StateQueued, job.SubstateQueued)
+	if err := s.finalizeRoute(j, owner); err != nil {
+		return err
+	}
+	j.Mu.RLock()
+	holdTypes := j.HoldTypes
+	execTime := j.ExecutionTime
+	queueName := j.Queue
+	j.Mu.RUnlock()
+	if holdTypes != "" && holdTypes != "n" {
+		s.jobMgr.UpdateJobState(j.ID, job.StateHeld, job.SubstateHeld)
+	} else if !execTime.IsZero() && execTime.After(time.Now()) {
+		s.jobMgr.UpdateJobState(j.ID, job.StateWaiting, job.SubstateWaiting)
+	}
+	if q := s.queueMgr.GetQueue(queueName); q != nil {
+		q.IncrJobCount(job.StateQueued)
+	}
+	s.saveJob(j)
+	if s.acctLog != nil {
+		j.Mu.RLock()
+		info := s.buildJobInfo(j)
+		j.Mu.RUnlock()
+		s.acctLog.RecordQueued(j.ID, info)
+	}
+	s.triggerSched()
+	return nil
+}
+
+// processJobArray expands a submitted array job (JobArrayReq != "") into its
+// per-index task sub-jobs and commits each. Returns (true, nil) when the master
+// was expanded (the master is consumed); (false, nil) for a non-array job; and
+// (true, err) after rolling back all created tasks if any task is rejected.
+func (s *Server) processJobArray(j *job.Job, owner string) (bool, error) {
+	j.Mu.RLock()
+	spec := j.JobArrayReq
+	script := j.Script
+	j.Mu.RUnlock()
+	if strings.TrimSpace(spec) == "" {
+		return false, nil
+	}
+	indices, err := parseArraySpec(spec)
+	if err != nil {
+		return false, err
+	}
+	if len(indices) == 0 {
+		return false, nil
+	}
+	base := j.ID
+	if idx := strings.Index(base, "."); idx > 0 {
+		base = base[:idx]
+	}
+	server := s.cfg.ServerName
+	var created []*job.Job
+	for _, i := range indices {
+		task := j.CloneForArray(i, server)
+		task.ID = fmt.Sprintf("%s[%d].%s", base, i, server)
+		s.jobMgr.AddJob(task)
+		created = append(created, task)
+		os.WriteFile(filepath.Join(s.cfg.JobsDir, task.ID+".SC"), []byte(script), 0700)
+	}
+	for _, task := range created {
+		if err := s.commitJobInstance(task, owner); err != nil {
+			for _, t := range created {
+				s.jobMgr.RemoveJob(t.ID)
+				os.Remove(filepath.Join(s.cfg.JobsDir, t.ID+".SC"))
+			}
+			return true, err
+		}
+	}
+	s.jobMgr.RemoveJob(j.ID)
+	os.Remove(filepath.Join(s.cfg.JobsDir, j.ID+".SC"))
+	log.Printf("[SERVER] Job array %s expanded into %d tasks", j.ID, len(created))
+	return true, nil
 }
 
 // handleCommit finalizes a job submission: transitions job to Queued state and persists.
@@ -741,56 +838,29 @@ func (s *Server) handleCommit(conn net.Conn, r *dis.Reader, hdr *dis.RequestHead
 		return false
 	}
 
-	// Set default output paths if not specified by user
-	s.setDefaultOutputPaths(j)
-
-	// Transition via manager to update state counters
-	s.jobMgr.UpdateJobState(jobID, job.StateQueued, job.SubstateQueued)
-
-	// Route queue -> destination and run the admission gate (TODO 3.1/3.7).
-	// Reject the job if no destination accepts it.
-	if err := s.finalizeRoute(j, j.Owner); err != nil {
+	// Expand job arrays, then commit as a single job if not an array.
+	expanded, aerr := s.processJobArray(j, j.Owner)
+	if aerr != nil {
+		log.Printf("[SERVER] Job %s rejected: %v", jobID, aerr)
+		s.jobMgr.RemoveJob(jobID)
+		os.Remove(filepath.Join(s.cfg.JobsDir, jobID+".SC"))
+		dis.SendErrorReply(conn, dis.PbsePerm, 0)
+		return false
+	}
+	if expanded {
+		log.Printf("[SERVER] Commit job array %s", jobID)
+		dis.SendJobIDReply(conn, dis.ReplyChoiceCommit, jobID)
+		return true
+	}
+	if err := s.commitJobInstance(j, j.Owner); err != nil {
 		log.Printf("[SERVER] Job %s rejected: %v", jobID, err)
 		s.jobMgr.RemoveJob(jobID)
 		os.Remove(filepath.Join(s.cfg.JobsDir, jobID+".SC"))
 		dis.SendErrorReply(conn, dis.PbsePerm, 0)
 		return false
 	}
-
-	// Apply hold or deferred execution after initial state transition
-	j.Mu.RLock()
-	holdTypes := j.HoldTypes
-	execTime := j.ExecutionTime
-	queueName := j.Queue
-	j.Mu.RUnlock()
-
-	if holdTypes != "" && holdTypes != "n" {
-		s.jobMgr.UpdateJobState(jobID, job.StateHeld, job.SubstateHeld)
-	} else if !execTime.IsZero() && execTime.After(time.Now()) {
-		s.jobMgr.UpdateJobState(jobID, job.StateWaiting, job.SubstateWaiting)
-	}
-
-	// Update queue counters
-	if q := s.queueMgr.GetQueue(queueName); q != nil {
-		q.IncrJobCount(job.StateQueued)
-	}
-
-	// Persist the job
-	s.saveJob(j)
-
-	log.Printf("[SERVER] Commit job %s to queue %s", jobID, queueName)
-
-	// Write Q (queued) accounting record
-	if s.acctLog != nil {
-		j.Mu.RLock()
-		info := s.buildJobInfo(j)
-		j.Mu.RUnlock()
-		s.acctLog.RecordQueued(jobID, info)
-	}
-
-	// Signal the scheduler: a newly queued job is ready to dispatch.
-	s.triggerSched()
-	dis.SendJobIDReply(conn, dis.ReplyChoiceCommit, jobID)
+	log.Printf("[SERVER] Commit job %s to queue %s", jobID, j.Queue)
+dis.SendJobIDReply(conn, dis.ReplyChoiceCommit, jobID)
 	return true
 }
 
