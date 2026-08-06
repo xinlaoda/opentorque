@@ -35,28 +35,33 @@ type Event struct {
 	Jobs      []JobDemand // only for EventCapacity
 	Shortfall Shortfall
 	// Node-level events:
-	PoolSize  int // current running node count for this pool (best effort)
-	MinNodes  int
-	MaxNodes  int
-	IdleTime  time.Duration
+	PoolSize         int // current running node count for this pool (best effort)
+	MinNodes         int
+	MaxNodes         int
+	IdleTime         time.Duration
 	ProvisionTimeout time.Duration // seconds a provisioned-but-not-booted VM may wait before reclaim (0 = default)
-	Reclaim   string
+	Reclaim          string
 	// Full cloud definition (forwarded to the CRP).
-	SubnetID string
-	ImageID  string
-	DiskSize int
-	DiskType string
-	SSHKey   string
-	Location string
-	RGName   string
+	SubnetID   string
+	ImageID    string
+	DiskSize   int
+	DiskType   string
+	SSHKey     string
+	Location   string
+	RGName     string
 	ServerAddr string // pbs_server endpoint for cloud-init (ip:port)
+
+	// M4 elasticity tuning knobs (per-pool).
+	Cooldown      time.Duration // seconds between scale-outs (0 = global default)
+	ScaleHeadroom int           // extra VMs beyond exact shortfall (burst cushion)
+	DrainTimeout  time.Duration // min interval / give-up window between reclaim attempts
 }
 
 // JobDemand is the resource demand of a single queued (cloud-bound) job.
 type JobDemand struct {
-	ID     string
-	CPUs   int
-	MemKB  int64
+	ID    string
+	CPUs  int
+	MemKB int64
 }
 
 // Shortfall is the cumulative capacity shortfall reported by the scheduler.
@@ -68,28 +73,28 @@ type Shortfall struct {
 
 // Pool tracks the state of one cloud-backed queue/pool.
 type Pool struct {
-	Queue   string
+	Queue    string
 	Provider string
-	SKU     string
+	SKU      string
 
-	MinNodes int
-	MaxNodes int
-	IdleTime time.Duration
-	Reclaim  string
-	SubnetID string
-	ImageID  string
-	DiskSize int
-	DiskType string
-	SSHKey   string
-	Location string
-	RGName   string
+	MinNodes   int
+	MaxNodes   int
+	IdleTime   time.Duration
+	Reclaim    string
+	SubnetID   string
+	ImageID    string
+	DiskSize   int
+	DiskType   string
+	SSHKey     string
+	Location   string
+	RGName     string
 	ServerAddr string
 
-	Running int               // VMs currently up/being tracked
-	Inflight int              // VMs being provisioned (Ensured, not yet up)
-	Provisioning map[string]string // vmID -> jobID bound during boot
-	ProvisionTimeout time.Duration // how long a still-booting VM may wait before reclaim (0 = default 10m)
-	ProvisionedAt map[string]time.Time // vmID -> when it entered Provisioning (for timeout sweep)
+	Running          int                  // VMs currently up/being tracked
+	Inflight         int                  // VMs being provisioned (Ensured, not yet up)
+	Provisioning     map[string]string    // vmID -> jobID bound during boot
+	ProvisionTimeout time.Duration        // how long a still-booting VM may wait before reclaim (0 = default 10m)
+	ProvisionedAt    map[string]time.Time // vmID -> when it entered Provisioning (for timeout sweep)
 
 	// Owned tracks dynamic nodes this pool created and currently manages
 	// (keyed by node name == VM name/id). A node stays Owned from the moment
@@ -103,6 +108,12 @@ type Pool struct {
 
 	CooldownUntil time.Time
 	LastScale     time.Time
+
+	// M4 tuning applied to this pool.
+	Cooldown     time.Duration        // per-pool scale-out cooldown (0 = global default)
+	Headroom     int                  // extra VMs beyond exact shortfall (burst cushion)
+	DrainTimeout time.Duration        // min interval between reclaim attempts for the same node
+	LastReclaim  map[string]time.Time // node -> last reclaim attempt (drain rate-limit)
 }
 
 // Controller is the Cloud Elastic Controller.
@@ -182,6 +193,7 @@ func (c *Controller) ensurePool(ev Event) *Pool {
 			ProvisionedAt: make(map[string]time.Time),
 			Owned:         make(map[string]bool),
 			IdleSince:     make(map[string]time.Time),
+			LastReclaim:   make(map[string]time.Time),
 		}
 		c.pools[ev.Queue] = p
 	}
@@ -203,6 +215,15 @@ func (c *Controller) ensurePool(ev Event) *Pool {
 	}
 	if ev.Reclaim != "" {
 		p.Reclaim = ev.Reclaim
+	}
+	if ev.Cooldown > 0 {
+		p.Cooldown = ev.Cooldown
+	}
+	if ev.ScaleHeadroom > 0 {
+		p.Headroom = ev.ScaleHeadroom
+	}
+	if ev.DrainTimeout > 0 {
+		p.DrainTimeout = ev.DrainTimeout
 	}
 	return p
 }
@@ -250,7 +271,58 @@ func (c *Controller) reclaimIdle() {
 			candidates = append(candidates, name)
 		}
 		for _, name := range candidates {
+			// Drain-timeout policy (M4.4): respect a minimum interval between
+			// reclaim attempts for the same node so a node whose reclaim or
+			// drain did not settle is not hammered on every sweep.
+			if p.DrainTimeout > 0 {
+				if last, ok := p.LastReclaim[name]; ok && now.Sub(last) < p.DrainTimeout {
+					log.Printf("[CEC] queue=%s node %s still in drain cooldown; deferring reclaim", qname, name)
+					continue
+				}
+			}
 			c.reclaimNodeLocked(qname, p, name, now)
+		}
+	}
+}
+
+// coalesceCapacityEvents drains any additional EventCapacity entries already
+// queued for the same pool and merges their shortfall into ev, so repeated
+// capacity events across adjacent scheduling cycles become one scale-out. It
+// combines metrics by taking the max per field and unioning the bound jobs.
+// Called with the controller lock held; only the Run goroutine reads Events,
+// so draining here is race-free. Non-coalescible events (different kind/queue)
+// are logged and dropped -- they are re-emitted by the next scheduler cycle.
+func (c *Controller) coalesceCapacityEvents(p *Pool, ev *Event) {
+	for {
+		select {
+		case e2 := <-c.Events:
+			if e2.Kind != EventCapacity || e2.Queue != p.Queue {
+				log.Printf("[CEC] queue=%s dropped %s event during coalesce (re-emitted next cycle)", p.Queue, e2.Kind)
+				continue
+			}
+			if e2.Shortfall.Nodes > ev.Shortfall.Nodes {
+				ev.Shortfall.Nodes = e2.Shortfall.Nodes
+			}
+			if e2.Shortfall.Cores > ev.Shortfall.Cores {
+				ev.Shortfall.Cores = e2.Shortfall.Cores
+			}
+			if e2.Shortfall.Blocked > ev.Shortfall.Blocked {
+				ev.Shortfall.Blocked = e2.Shortfall.Blocked
+			}
+			seen := make(map[string]bool)
+			for _, j := range ev.Jobs {
+				seen[j.ID] = true
+			}
+			for _, j := range e2.Jobs {
+				if !seen[j.ID] {
+					seen[j.ID] = true
+					ev.Jobs = append(ev.Jobs, j)
+				}
+			}
+			log.Printf("[CEC] queue=%s coalesced capacity event (nodes=%d cores=%d blocked=%d)",
+				p.Queue, ev.Shortfall.Nodes, ev.Shortfall.Cores, ev.Shortfall.Blocked)
+		default:
+			return
 		}
 	}
 }
@@ -258,6 +330,9 @@ func (c *Controller) reclaimIdle() {
 // reclaimNodeLocked drains, deregisters, and cloud-reclaims one idle dynamic
 // node. Called with the controller lock held.
 func (c *Controller) reclaimNodeLocked(qname string, p *Pool, name string, now time.Time) {
+	if p.LastReclaim != nil {
+		p.LastReclaim[name] = now
+	}
 	nodes := c.nodes
 	if nodes == nil {
 		log.Printf("[CEC] queue=%s want to reclaim idle node %s but no NodeController set; skipping", qname, name)
@@ -291,6 +366,9 @@ func (c *Controller) reclaimNodeLocked(qname string, p *Pool, name string, now t
 
 	delete(p.Owned, name)
 	delete(p.IdleSince, name)
+	if p.LastReclaim != nil {
+		delete(p.LastReclaim, name)
+	}
 	if p.Running > 0 {
 		p.Running--
 	}
@@ -316,7 +394,7 @@ func (c *Controller) handle(ev Event) {
 // desiredSize computes how many VMs the pool should target given the shortfall
 // and in-flight/provisioning accounting, capped at MaxNodes.
 func (p *Pool) desiredSize(ev Event) int {
-	target := p.Running + ev.Shortfall.Nodes
+	target := p.Running + ev.Shortfall.Nodes + p.Headroom
 	if p.MaxNodes > 0 && target > p.MaxNodes {
 		target = p.MaxNodes
 	}
@@ -328,6 +406,9 @@ func (p *Pool) desiredSize(ev Event) int {
 
 func (c *Controller) handleCapacity(ev Event) {
 	p := c.ensurePool(ev)
+	// Coalesce any NeedCapacity events already queued for this pool so bursts
+	// across adjacent cycles are handled in a single scale-out (M4.3).
+	c.coalesceCapacityEvents(p, &ev)
 	now := time.Now()
 	if now.Before(p.CooldownUntil) {
 		log.Printf("[CEC] queue=%s in cooldown until %s, skipping scale-out", ev.Queue, p.CooldownUntil.Format(time.RFC3339))
@@ -341,9 +422,14 @@ func (c *Controller) handleCapacity(ev Event) {
 		return
 	}
 
-	// Cooldown applied around each scale-out to avoid flapping.
+	// Cooldown applied around each scale-out to avoid flapping. Per-pool
+	// cloud_cooldown overrides the controller-wide default (M4.1).
+	cd := p.Cooldown
+	if cd <= 0 {
+		cd = c.Cooldown
+	}
 	p.LastScale = now
-	p.CooldownUntil = now.Add(c.Cooldown)
+	p.CooldownUntil = now.Add(cd)
 
 	log.Printf("[CEC] queue=%s scaling OUT by %d (target=%d running=%d inflight=%d) cores_shortfall=%d blocked=%d",
 		ev.Queue, need, target, p.Running, p.Inflight, ev.Shortfall.Cores, ev.Shortfall.Blocked)

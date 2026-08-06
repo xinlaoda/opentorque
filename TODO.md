@@ -588,11 +588,37 @@ dynamic VM, then idle-time-based drain/deregister/deallocate all ran live:
   orphaned ot-node-* NICs in the test RG were manually cleaned up.
 
 - **M4** — cooldown tuning, shortfall headroom, `NeedCapacity` merge/coalesce,
-  drain timeout policy, surface per-pool free-cores via a status RPC (extends
-  the `qstat -B` gap in 2.9).
+  drain timeout policy. **[DONE -- implemented & live-tested]** (see 4.4d) --
+  surface per-pool free-cores via a status RPC remains a follow-up (extends the
+  `qstat -B` gap in 2.9).
 - Blockers (design §11): multi-node jobs (1.4) affect shortfall math; jobs
   larger than one SKU node cannot be placed; expose per-queue free cores
-  snapshot.
+  snapshot remains open.
+
+### 4.4d M4 implementation + live test results (RG xxin-opentorque-test, westus3)
+M4 adds the queue tuning knobs and CEC elasticity refinements:
+- New queue attrs (parsed, displayed, persisted across server restart):
+  `cloud_cooldown` (seconds between scale-out actions per pool, 0 = global
+  default), `cloud_scale_headroom` (extra VMs beyond exact shortfall for burst
+  cushion), `cloud_drain_timeout` (seconds a reclaim may drain a busy node
+  before giving up, 0 = default). Wired through `internal/queue`,
+  `internal/server` (`applyQueueAttrs` + `formatQueueStatus` + `saveQueue`/
+  recover), and `internal/sched/scheduler` (`QueueInfo`/`CapacityEvent`).
+- CEC: per-pool cooldown override, `desiredSize` + headroom in scale-out,
+  `coalesceCapacityEvents` (drain queued `NeedCapacity` events, take max
+  shortfall, union jobs), drain-timeout rate-limit in `reclaimIdle`, and
+  `LastReclaim` map. `cmd/pbs_sched/main.go` wires the new fields into the CEC
+  event.
+- Local build + unit tests pass; 4 new CEC unit tests
+  (`TestDesiredSizeHeadroom`, `TestPerPoolCooldown`, `TestCoalesceCapacity`,
+  `TestDrainTimeoutRateLimit`). VM `go vet` clean, full `go test ./internal/...`
+  passes.
+- Live (2026-08-06, srv): set `cloud_cooldown=120 cloud_scale_headroom=2
+  cloud_drain_timeout=60` on queue `batch` -> shown in-memory, and after a real
+  server restart all three persisted (verified in `server_priv/queues/batch`
+  and via `qmgr print queue batch`). Attributes then reset to defaults to keep
+  the production `batch` config intact. All 6 changed files byte-match local
+  vs VM (go1.22.12).
 
 ---
 

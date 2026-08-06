@@ -22,9 +22,9 @@ import (
 
 	"github.com/xinlaoda/opentorque/internal/cec"
 	"github.com/xinlaoda/opentorque/internal/crp"
-	"github.com/xinlaoda/opentorque/internal/sched/dis"
 	"github.com/xinlaoda/opentorque/internal/sched/client"
 	"github.com/xinlaoda/opentorque/internal/sched/config"
+	"github.com/xinlaoda/opentorque/internal/sched/dis"
 	"github.com/xinlaoda/opentorque/internal/sched/scheduler"
 	"github.com/xinlaoda/opentorque/pkg/pbslog"
 )
@@ -230,23 +230,26 @@ func runOneCycle(sched *scheduler.Scheduler, cfg *config.Config, limited bool, c
 	// Forward any cloud capacity events to the CEC.
 	for _, ce := range res.CapacityEvents {
 		ev := cec.Event{
-			Kind:     cec.EventCapacity,
-			Queue:    ce.Queue,
-			Provider: ce.Provider,
-			SKU:      ce.SKU,
-			MinNodes: ce.MinNodes,
-			MaxNodes: ce.MaxNodes,
-			IdleTime: time.Duration(ce.IdleTime) * time.Second,
+			Kind:             cec.EventCapacity,
+			Queue:            ce.Queue,
+			Provider:         ce.Provider,
+			SKU:              ce.SKU,
+			MinNodes:         ce.MinNodes,
+			MaxNodes:         ce.MaxNodes,
+			IdleTime:         time.Duration(ce.IdleTime) * time.Second,
 			ProvisionTimeout: time.Duration(ce.ProvisionTimeout) * time.Second,
-			Reclaim:  ce.Reclaim,
-			SubnetID: ce.SubnetID,
-			ImageID:  ce.ImageID,
-			DiskSize: ce.DiskSize,
-			DiskType: ce.DiskType,
-			SSHKey:   ce.SSHKey,
-			Location: ce.Location,
-			RGName:   ce.RGName,
-			ServerAddr: cfg.Server,
+			Reclaim:          ce.Reclaim,
+			SubnetID:         ce.SubnetID,
+			ImageID:          ce.ImageID,
+			DiskSize:         ce.DiskSize,
+			DiskType:         ce.DiskType,
+			SSHKey:           ce.SSHKey,
+			Location:         ce.Location,
+			RGName:           ce.RGName,
+			ServerAddr:       cfg.Server,
+			Cooldown:         time.Duration(ce.Cooldown) * time.Second,
+			ScaleHeadroom:    ce.ScaleHeadroom,
+			DrainTimeout:     time.Duration(ce.DrainTimeout) * time.Second,
 			Shortfall: cec.Shortfall{
 				Cores:   ce.Cores,
 				Nodes:   ce.Nodes,
@@ -304,9 +307,9 @@ func (n *serverNodeController) DeregisterNode(name string) error {
 // can notify the CEC about registered nodes on every cycle, not only on
 // capacity-shortfall cycles.
 type cloudTracker struct {
-	mu     sync.Mutex
-	ctrl   *cec.Controller
-	known  map[string]struct{}
+	mu    sync.Mutex
+	ctrl  *cec.Controller
+	known map[string]struct{}
 }
 
 func newCloudTracker(ctrl *cec.Controller) *cloudTracker {
@@ -328,4 +331,3 @@ func (t *cloudTracker) queues() []string {
 	}
 	return out
 }
-

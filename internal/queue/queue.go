@@ -64,20 +64,25 @@ type Queue struct {
 	// When CloudProvider is non-empty the queue is treated as a cloud-backed
 	// pool: an external Cloud Resource Provider (CRP) provisions/deprovisions
 	// worker VMs on demand (see docs/cloud-elastic-event-driven-design.md).
-	CloudProvider  string // cloud name: "azure" | "aws" | "" (static pool)
-	CloudVMSKU     string // VM size/family, e.g. "Standard_D8s_v3"
-	CloudMinNodes  int    // floor: nodes kept scaled-in
-	CloudMaxNodes        int    // cap: max nodes the queue may scale to (0 = unlimited)
-	CloudIdleTime        int    // seconds idle before a node becomes a scale-in candidate
+	CloudProvider         string // cloud name: "azure" | "aws" | "" (static pool)
+	CloudVMSKU            string // VM size/family, e.g. "Standard_D8s_v3"
+	CloudMinNodes         int    // floor: nodes kept scaled-in
+	CloudMaxNodes         int    // cap: max nodes the queue may scale to (0 = unlimited)
+	CloudIdleTime         int    // seconds idle before a node becomes a scale-in candidate
 	CloudProvisionTimeout int    // seconds a provisioned-but-not-booted VM may wait before reclaim (0 = default)
-	CloudReclaim         string // deallocate | hibernate
-	CloudSubnetID    string // Azure subnet resource ID where worker VMs are placed
-	CloudImageID   string // OS image: id, urn, or shared-image-gallery reference
-	CloudDiskSize  int    // OS disk size in GB (0 = provider default)
-	CloudDiskType  string // OS disk type, e.g. "Premium_LRS" (optional)
-	CloudSSHKey    string // authorized SSH public key for worker VMs
-	CloudLocation  string // Azure region for worker VM creation ("" = server region)
-	CloudRgName    string // Azure resource group for worker VMs ("" = server rg)
+	CloudReclaim          string // deallocate | hibernate
+	CloudSubnetID         string // Azure subnet resource ID where worker VMs are placed
+	CloudImageID          string // OS image: id, urn, or shared-image-gallery reference
+	CloudDiskSize         int    // OS disk size in GB (0 = provider default)
+	CloudDiskType         string // OS disk type, e.g. "Premium_LRS" (optional)
+	CloudSSHKey           string // authorized SSH public key for worker VMs
+	CloudLocation         string // Azure region for worker VM creation ("" = server region)
+	CloudRgName           string // Azure resource group for worker VMs ("" = server rg)
+
+	// M4 elasticity tuning knobs.
+	CloudCooldown      int // seconds between scale-out actions for this pool (0 = global default)
+	CloudScaleHeadroom int // extra VMs to provision beyond the exact shortfall (burst cushion)
+	CloudDrainTimeout  int // seconds a reclaim may spend draining a busy node before giving up (0 = default)
 }
 
 // ParseList splits a comma/space separated configuration value into a trimmed,

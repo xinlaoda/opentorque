@@ -26,28 +26,28 @@ type JobInfo struct {
 	Priority  int
 	QueueTime time.Time
 	Walltime  time.Duration
-	MemReq    int64 // requested memory in KB
-	CPUReq    int   // requested CPUs
-	Host      string // -l host=<node> pinning (empty = anywhere)
+	MemReq    int64    // requested memory in KB
+	CPUReq    int      // requested CPUs
+	Host      string   // -l host=<node> pinning (empty = anywhere)
 	Features  []string // -l feature=<list> required node properties
 
 	// Scheduling state
-	CanNotRun    bool
-	CanNeverRun  bool
+	CanNotRun     bool
+	CanNeverRun   bool
 	StarvingSince time.Time
 }
 
 // NodeInfo holds scheduling-relevant attributes for a compute node.
 type NodeInfo struct {
-	Name      string
-	State     string
-	NumProcs  int
-	FreeCPUs  int
-	TotalMem  int64 // KB
-	AvailMem  int64 // KB
-	LoadAvg   float64
-	Jobs      []string
-	UsedCPUs  int    // CPUs currently consumed by running jobs (from node used_cpus)
+	Name       string
+	State      string
+	NumProcs   int
+	FreeCPUs   int
+	TotalMem   int64 // KB
+	AvailMem   int64 // KB
+	LoadAvg    float64
+	Jobs       []string
+	UsedCPUs   int      // CPUs currently consumed by running jobs (from node used_cpus)
 	Properties []string // node properties/features used for feature matching
 }
 
@@ -65,21 +65,24 @@ type QueueInfo struct {
 
 	// Cloud elasticity (cloud-backed queues). When CloudBacked is true the
 	// queue's jobs may be scaled out onto dynamically provisioned VMs.
-	CloudBacked    bool
-	CloudProvider  string
-	CloudSKU       string
-	CloudMinNodes  int
-	CloudMaxNodes  int
-	CloudIdleTime  int    // seconds a free node waits before scale-in
+	CloudBacked           bool
+	CloudProvider         string
+	CloudSKU              string
+	CloudMinNodes         int
+	CloudMaxNodes         int
+	CloudIdleTime         int // seconds a free node waits before scale-in
 	CloudProvisionTimeout int // seconds a provisioned-but-not-booted VM may wait before reclaim (0 = default)
-	CloudReclaim   string
-	CloudSubnetID  string
-	CloudImageID   string
-	CloudDiskSize  int
-	CloudDiskType  string
-	CloudSSHKey    string
-	CloudLocation  string
-	CloudRGName    string
+	CloudReclaim          string
+	CloudSubnetID         string
+	CloudImageID          string
+	CloudDiskSize         int
+	CloudDiskType         string
+	CloudSSHKey           string
+	CloudLocation         string
+	CloudRGName           string
+	CloudCooldown         int // seconds between scale-out actions (0 = global default)
+	CloudScaleHeadroom    int // extra VMs to provision beyond exact shortfall
+	CloudDrainTimeout     int // seconds a reclaim may spend draining before giving up (0 = default)
 }
 
 // CapacityEvent is an event emitted by a scheduling cycle when a cloud-backed
@@ -94,22 +97,25 @@ type CapacityEvent struct {
 	// Jobs is the list of queued job IDs that contributed to this demand.
 	Jobs []string
 	// Shortfall summarizes how much capacity is missing.
-	Cores    int
-	Nodes    int
-	Blocked  int
-	MinNodes int
-	MaxNodes int
-	IdleTime int
+	Cores            int
+	Nodes            int
+	Blocked          int
+	MinNodes         int
+	MaxNodes         int
+	IdleTime         int
 	ProvisionTimeout int
-	Reclaim  string
+	Reclaim          string
 	// Full cloud definition (passed through to the CEC/CRP).
-	SubnetID string
-	ImageID  string
-	DiskSize int
-	DiskType string
-	SSHKey   string
-	Location string
-	RGName   string
+	SubnetID      string
+	ImageID       string
+	DiskSize      int
+	DiskType      string
+	SSHKey        string
+	Location      string
+	RGName        string
+	Cooldown      int // seconds between scale-outs for this pool (0 = global default)
+	ScaleHeadroom int // extra VMs to provision beyond exact shortfall
+	DrainTimeout  int // seconds a reclaim may spend draining before giving up (0 = default)
 }
 
 // CycleResult carries the outcome of a scheduling cycle: how many jobs were
@@ -117,8 +123,8 @@ type CapacityEvent struct {
 type CycleResult struct {
 	Dispatched     int
 	CapacityEvents []CapacityEvent
-	FreeNodes      []string // names of nodes with available capacity after this cycle
-	IdleNodes      []string // names of nodes with no running jobs and free capacity (scale-in candidates)
+	FreeNodes      []string            // names of nodes with available capacity after this cycle
+	IdleNodes      []string            // names of nodes with no running jobs and free capacity (scale-in candidates)
 	QueuedByQueue  map[string][]string // per-cloud-queue, job IDs still queued after this cycle (catch qdel-during-provisioning)
 	// AliveJobs is the set of job IDs that still exist in the server after this
 	// cycle (queued + running). The CEC uses it to avoid tearing down a
@@ -233,21 +239,24 @@ func (s *Scheduler) runCycle(conn *client.Conn, limited bool) (*CycleResult, err
 				ev, ok := pendingCap[q.Name]
 				if !ok {
 					ev = &CapacityEvent{
-						Queue:     q.Name,
-						Provider:  q.CloudProvider,
-						SKU:       q.CloudSKU,
-						MinNodes:  q.CloudMinNodes,
-						MaxNodes:  q.CloudMaxNodes,
-						IdleTime:  q.CloudIdleTime,
+						Queue:            q.Name,
+						Provider:         q.CloudProvider,
+						SKU:              q.CloudSKU,
+						MinNodes:         q.CloudMinNodes,
+						MaxNodes:         q.CloudMaxNodes,
+						IdleTime:         q.CloudIdleTime,
 						ProvisionTimeout: q.CloudProvisionTimeout,
-						Reclaim:   q.CloudReclaim,
-						SubnetID:  q.CloudSubnetID,
-						ImageID:   q.CloudImageID,
-						DiskSize:  q.CloudDiskSize,
-						DiskType:  q.CloudDiskType,
-						SSHKey:    q.CloudSSHKey,
-						Location:  q.CloudLocation,
-						RGName:    q.CloudRGName,
+						Reclaim:          q.CloudReclaim,
+						SubnetID:         q.CloudSubnetID,
+						ImageID:          q.CloudImageID,
+						DiskSize:         q.CloudDiskSize,
+						DiskType:         q.CloudDiskType,
+						SSHKey:           q.CloudSSHKey,
+						Location:         q.CloudLocation,
+						RGName:           q.CloudRGName,
+						Cooldown:         q.CloudCooldown,
+						ScaleHeadroom:    q.CloudScaleHeadroom,
+						DrainTimeout:     q.CloudDrainTimeout,
 					}
 					pendingCap[q.Name] = ev
 				}
@@ -518,11 +527,11 @@ func (s *Scheduler) sortJobs(jobs []*JobInfo, now time.Time) {
 
 // jobIterator provides different job iteration strategies.
 type jobIterator struct {
-	sched  *Scheduler
-	sinfo  *ServerInfo
-	mode   string // "round_robin", "by_queue", "flat"
-	qIdx   int    // current queue index (round-robin/by-queue)
-	jIdx   []int  // per-queue job index (round-robin)
+	sched *Scheduler
+	sinfo *ServerInfo
+	mode  string // "round_robin", "by_queue", "flat"
+	qIdx  int    // current queue index (round-robin/by-queue)
+	jIdx  []int  // per-queue job index (round-robin)
 }
 
 // newJobIterator creates a job iterator based on the scheduling configuration.
@@ -864,6 +873,12 @@ func parseQueueInfo(obj client.StatusObject) *QueueInfo {
 			q.CloudLocation = a.Value
 		case "cloud_rg_name":
 			q.CloudRGName = a.Value
+		case "cloud_cooldown":
+			q.CloudCooldown, _ = strconv.Atoi(a.Value)
+		case "cloud_scale_headroom":
+			q.CloudScaleHeadroom, _ = strconv.Atoi(a.Value)
+		case "cloud_drain_timeout":
+			q.CloudDrainTimeout, _ = strconv.Atoi(a.Value)
 		}
 	}
 	return q

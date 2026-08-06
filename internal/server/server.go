@@ -2461,6 +2461,15 @@ func (s *Server) formatQueueStatus(q *queue.Queue) dis.StatusObject {
 	if q.CloudRgName != "" {
 		add("cloud_rg_name", q.CloudRgName)
 	}
+	if q.CloudCooldown > 0 {
+		add("cloud_cooldown", strconv.Itoa(q.CloudCooldown))
+	}
+	if q.CloudScaleHeadroom > 0 {
+		add("cloud_scale_headroom", strconv.Itoa(q.CloudScaleHeadroom))
+	}
+	if q.CloudDrainTimeout > 0 {
+		add("cloud_drain_timeout", strconv.Itoa(q.CloudDrainTimeout))
+	}
 
 	return dis.StatusObject{Type: dis.MgrObjQueue, Name: q.Name, Attrs: attrs}
 }
@@ -3037,6 +3046,12 @@ func (s *Server) applyQueueAttrs(q *queue.Queue, attrs []dis.SvrAttrl) {
 			q.CloudLocation = a.Value
 		case "cloud_rg_name":
 			q.CloudRgName = a.Value
+		case "cloud_cooldown":
+			fmt.Sscanf(a.Value, "%d", &q.CloudCooldown)
+		case "cloud_scale_headroom":
+			fmt.Sscanf(a.Value, "%d", &q.CloudScaleHeadroom)
+		case "cloud_drain_timeout":
+			fmt.Sscanf(a.Value, "%d", &q.CloudDrainTimeout)
 		case "max_user_queuable":
 			fmt.Sscanf(a.Value, "%d", &q.MaxUserJobs)
 		case "max_user_run":
@@ -4466,6 +4481,12 @@ func (s *Server) recoverQueues() {
 						q.CloudLocation = val
 					case "cloud_rg_name":
 						q.CloudRgName = val
+					case "cloud_cooldown":
+						fmt.Sscanf(val, "%d", &q.CloudCooldown)
+					case "cloud_scale_headroom":
+						fmt.Sscanf(val, "%d", &q.CloudScaleHeadroom)
+					case "cloud_drain_timeout":
+						fmt.Sscanf(val, "%d", &q.CloudDrainTimeout)
 					case "max_queuable":
 						fmt.Sscanf(val, "%d", &q.MaxJobs)
 					case "max_running":
@@ -4848,6 +4869,15 @@ func (s *Server) saveQueue(q *queue.Queue) {
 	}
 	if q.CloudRgName != "" {
 		sb.WriteString("cloud_rg_name=" + q.CloudRgName + "\n")
+	}
+	if q.CloudCooldown > 0 {
+		sb.WriteString(fmt.Sprintf("cloud_cooldown=%d\n", q.CloudCooldown))
+	}
+	if q.CloudScaleHeadroom > 0 {
+		sb.WriteString(fmt.Sprintf("cloud_scale_headroom=%d\n", q.CloudScaleHeadroom))
+	}
+	if q.CloudDrainTimeout > 0 {
+		sb.WriteString(fmt.Sprintf("cloud_drain_timeout=%d\n", q.CloudDrainTimeout))
 	}
 
 	// Limits, ACLs and route destinations (TODO 3.1/3.7)
