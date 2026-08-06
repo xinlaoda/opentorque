@@ -65,6 +65,12 @@ type Node struct {
 	Note       string   // Administrator note
 	Queue      string   // optional pool/queue ownership (per-pool free-cores)
 
+	// Dynamic marks a node that was auto-registered (e.g. a cloud-provisioned
+	// VM) rather than a statically-configured local node. The scheduler uses
+	// this to dispatch jobs to local nodes first and only fall back to
+	// dynamic (cloud) nodes when local capacity is exhausted.
+	Dynamic bool
+
 	// Attributes (generic)
 	Attrs map[string]string
 

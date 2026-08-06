@@ -150,3 +150,35 @@ func TestIsRouteQueue(t *testing.T) {
 		t.Fatal("expected empty type to not be route queue")
 	}
 }
+
+// TestFindNodeForJobLocalFirst: a free local (static) node is always preferred
+// over an auto-registered cloud/dynamic node, even when the cloud node has more
+// free CPUs -- so cloud burst only kicks in when local capacity is exhausted
+// and a cloud VM is not kept alive while local sits idle.
+func TestFindNodeForJobLocalFirst(t *testing.T) {
+	s := newTestScheduler()
+	sinfo := &ServerInfo{Nodes: []*NodeInfo{
+		{Name: "cloud1", State: "free", FreeCPUs: 8, Dynamic: true},
+		{Name: "local1", State: "free", FreeCPUs: 1, Dynamic: false},
+	}}
+	j := &JobInfo{ID: "1", CPUReq: 1}
+	got := s.findNodeForJob(sinfo, j)
+	if got == nil || got.Name != "local1" {
+		t.Fatalf("local-first expected local1, got %+v", got)
+	}
+}
+
+// TestFindNodeForJobCloudFallback: once no local node can take the job, the
+// scheduler falls back to the cloud/dynamic node.
+func TestFindNodeForJobCloudFallback(t *testing.T) {
+	s := newTestScheduler()
+	sinfo := &ServerInfo{Nodes: []*NodeInfo{
+		{Name: "local1", State: "free", FreeCPUs: 0, Dynamic: false},
+		{Name: "cloud1", State: "free", FreeCPUs: 4, Dynamic: true},
+	}}
+	j := &JobInfo{ID: "1", CPUReq: 1}
+	got := s.findNodeForJob(sinfo, j)
+	if got == nil || got.Name != "cloud1" {
+		t.Fatalf("expected fallback to cloud1, got %+v", got)
+	}
+}

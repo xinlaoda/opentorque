@@ -1729,7 +1729,8 @@ func (s *Server) tryAutoRegisterNode(hostname string, remoteIP net.IP) bool {
 	if s.cfg.AutoNodeNP && s.cfg.NPDefault > 0 {
 		np = s.cfg.NPDefault
 	}
-	s.nodeMgr.AddNode(hostname, np)
+	nn := s.nodeMgr.AddNode(hostname, np)
+	nn.Dynamic = true
 	s.saveNodes()
 	log.Printf("[SERVER] Auto-registered dynamic node %s (ip=%s, np=%d)", hostname, remoteIP, np)
 	return true
@@ -2523,6 +2524,9 @@ func (s *Server) formatNodeStatus(n *node.Node) dis.StatusObject {
 	}
 	if n.Note != "" {
 		add("note", n.Note)
+	}
+	if n.Dynamic {
+		add("is_dynamic", "true")
 	}
 
 	return dis.StatusObject{Type: dis.MgrObjNode, Name: n.Name, Attrs: attrs}
@@ -4591,6 +4595,7 @@ func (s *Server) recoverNodes() {
 		nodeName := parts[0]
 		np := 1
 		qname := ""
+		dynamic := false
 		for _, p := range parts[1:] {
 			if strings.HasPrefix(p, "np=") {
 				fmt.Sscanf(p[3:], "%d", &np)
@@ -4598,10 +4603,16 @@ func (s *Server) recoverNodes() {
 			if strings.HasPrefix(p, "queue=") {
 				qname = p[len("queue="):]
 			}
+			if p == "dynamic=1" {
+				dynamic = true
+			}
 		}
 		nn := s.nodeMgr.AddNode(nodeName, np)
 		if qname != "" {
 			nn.Queue = qname
+		}
+		if dynamic {
+			nn.Dynamic = true
 		}
 	}
 }
@@ -5002,11 +5013,14 @@ func (s *Server) saveNodes() {
 	var sb strings.Builder
 	for _, n := range s.nodeMgr.AllNodes() {
 		n.Mu.RLock()
+		var extra string
 		if n.Queue != "" {
-			sb.WriteString(fmt.Sprintf("%s np=%d queue=%s\n", n.Name, n.NumProcs, n.Queue))
-		} else {
-			sb.WriteString(fmt.Sprintf("%s np=%d\n", n.Name, n.NumProcs))
+			extra = " queue=" + n.Queue
 		}
+		if n.Dynamic {
+			extra += " dynamic=1"
+		}
+		sb.WriteString(fmt.Sprintf("%s np=%d%s\n", n.Name, n.NumProcs, extra))
 		n.Mu.RUnlock()
 	}
 	tmpFile := s.cfg.NodesFile + ".new"

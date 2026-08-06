@@ -49,6 +49,7 @@ type NodeInfo struct {
 	Jobs       []string
 	UsedCPUs   int      // CPUs currently consumed by running jobs (from node used_cpus)
 	Properties []string // node properties/features used for feature matching
+	Dynamic    bool     // auto-registered cloud/dynamic node (prefer local statics)
 }
 
 // QueueInfo holds scheduling-relevant attributes for a queue.
@@ -697,17 +698,23 @@ func (s *Scheduler) findNodeForJob(sinfo *ServerInfo, jinfo *JobInfo) *NodeInfo 
 		return nil
 	}
 
-	if s.cfg.LoadBalancing {
-		// Load balancing: pick the node with the lowest load
-		sort.Slice(candidates, func(i, k int) bool {
+	// Local-first: statically-configured local nodes are always preferred over
+	// auto-registered cloud/dynamic nodes. Cloud burst should only be used when
+	// the local machines cannot satisfy demand, so a still-registered cloud VM
+	// is never dispatched ahead of a free local node (which would keep the cloud
+	// VM alive while local sits idle past its reclaim window). Within each
+	// group the configured packing rule still applies.
+	sort.SliceStable(candidates, func(i, k int) bool {
+		if candidates[i].Dynamic != candidates[k].Dynamic {
+			return !candidates[i].Dynamic // static (local) first
+		}
+		if s.cfg.LoadBalancing {
+			// Load balancing: pick the node with the lowest load
 			return candidates[i].LoadAvg < candidates[k].LoadAvg
-		})
-	} else {
-		// Default: pack jobs onto the first available node (best fit)
-		sort.Slice(candidates, func(i, k int) bool {
-			return candidates[i].FreeCPUs < candidates[k].FreeCPUs
-		})
-	}
+		}
+		// Default: pack jobs onto the most-loaded node (best fit)
+		return candidates[i].FreeCPUs < candidates[k].FreeCPUs
+	})
 
 	return candidates[0]
 }
@@ -833,6 +840,8 @@ func parseNodeInfo(obj client.StatusObject) *NodeInfo {
 					n.Properties = append(n.Properties, p)
 				}
 			}
+		case "is_dynamic":
+			n.Dynamic = (a.Value == "true")
 		}
 	}
 	// If the server reported used_cpus (authoritative per-job CPUReq sum), use it
