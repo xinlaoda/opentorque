@@ -66,6 +66,7 @@ func admitToQueue(jm *job.Manager, q *queue.Queue, rj *job.Job, user string, fro
 	aclGroups := append([]string(nil), q.ACLGroups...)
 	aclHostEn := q.ACLHostEnabled
 	aclHosts := append([]string(nil), q.ACLHosts...)
+	disallowed := append([]string(nil), q.DisallowedTypes...)
 	resMax := q.ResourceMax
 	resMin := q.ResourceMin
 	q.Mu.RUnlock()
@@ -78,6 +79,13 @@ func admitToQueue(jm *job.Manager, q *queue.Queue, rj *job.Job, user string, fro
 	}
 	if fromRouteOnly && !fromRoute {
 		return fmt.Errorf("queue %s only accepts routed jobs", q.Name)
+	}
+	for _, jt := range jobTypes(rj) {
+		for _, dt := range disallowed {
+			if jt == dt {
+				return fmt.Errorf("queue %s disallows job type %s", q.Name, dt)
+			}
+		}
 	}
 	if maxJobs > 0 {
 		cur := jm.CountByStateInQueue(q.Name, job.StateQueued, job.StateProvisioning) +
@@ -236,4 +244,22 @@ func (s *Server) finalizeRoute(rj *job.Job, owner string) error {
 		return fmt.Errorf("queue %s not found", dest)
 	}
 	return admitToQueue(s.jobMgr, q, rj, owner, false)
+}
+
+
+// jobTypes returns the PBS job-type tags a job carries. Every job is "batch";
+// it is additionally "interactive" (-I), "rerunable" (-r y), or "job_array"
+// (-t) as applicable. Used by the queue disallowed_types gate (TODO 3.5).
+func jobTypes(j *job.Job) []string {
+	types := []string{"batch"}
+	if j.Interactive {
+		types = append(types, "interactive")
+	}
+	if strings.EqualFold(strings.TrimSpace(j.Rerunnable), "y") {
+		types = append(types, "rerunable")
+	}
+	if j.JobArrayReq != "" {
+		types = append(types, "job_array")
+	}
+	return types
 }

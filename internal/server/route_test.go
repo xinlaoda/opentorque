@@ -168,3 +168,42 @@ func TestRouteJobNotRouteQueue(t *testing.T) {
 		t.Fatalf("expected passthrough, got dest=%s routed=%v err=%v", dest, routed, err)
 	}
 }
+
+func TestJobTypes(t *testing.T) {
+	rj := job.NewJob("1.srv", "batch", "srv")
+	if got := jobTypes(rj); len(got) != 1 || got[0] != "batch" {
+		t.Fatalf("plain job types = %v", got)
+	}
+	rj.Interactive = true
+	if got := jobTypes(rj); len(got) != 2 {
+		t.Fatalf("interactive types = %v", got)
+	}
+	rj = job.NewJob("2.srv", "batch", "srv")
+	rj.JobArrayReq = "1-3"
+	if got := jobTypes(rj); len(got) != 2 || got[1] != "job_array" {
+		t.Fatalf("array types = %v", got)
+	}
+	rj = job.NewJob("3.srv", "batch", "srv")
+	rj.Rerunnable = "y"
+	if got := jobTypes(rj); len(got) != 2 || got[1] != "rerunable" {
+		t.Fatalf("rerunable types = %v", got)
+	}
+}
+
+func TestAdmitQueueDisallowedTypes(t *testing.T) {
+	q := testAdmitQueue(t)
+	q.DisallowedTypes = []string{"interactive"}
+	jm := job.NewManager("srv", 1)
+
+	// batch job passes
+	rj := job.NewJob("1.srv", "batch", "srv")
+	if err := admitToQueue(jm, q, rj, "alice", false); err != nil {
+		t.Fatalf("batch should pass, got %v", err)
+	}
+	// interactive job rejected
+	rj = job.NewJob("1.srv", "batch", "srv")
+	rj.Interactive = true
+	if err := admitToQueue(jm, q, rj, "alice", false); err == nil {
+		t.Fatal("interactive should be rejected by disallowed_types")
+	}
+}

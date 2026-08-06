@@ -275,7 +275,7 @@ permission permitting).
 
 
 
-### 3.5 Queue attributes: model vs. configured vs. used mismatch  [GAP]
+### 3.5 Queue attributes: model vs. configured vs. used mismatch  [DONE - reconciled]
 The `Queue` data model (`internal/queue/queue.go`), the set of attributes that
 `applyQueueAttrs` in `internal/server/server.go` actually honors, and the
 attributes the scheduler consumes are **three different sets**:
@@ -297,6 +297,16 @@ attributes the scheduler consumes are **three different sets**:
 - Expected: reconcile these sets — implement ACL enforcement, per-user limits,
   route destinations, and queue priority end-to-end, or document them as
   unsupported and remove the misleading stub fields.
+
+> **DONE (2026-08-05):** model / configured / used sets are now reconciled.
+> ACL enforcement, per-user limits, route destinations and resource limits were
+> already wired by 3.1/3.7. This pass completed the remaining gap: **queue
+> `Priority`** (model field + `applyQueueAttrs` + `formatQueueStatus` + disk
+> persistence; the scheduler already consumed it) and **`disallowed_types`**
+> (model + parse/display/persist + admission gate enforcement via `jobTypes`:
+> batch/interactive/rerunable/job_array). Live: queue `Priority=100` shows and
+> persists; `disallowed_types=job_array` rejected a `qsub -t 1-2` (15007) while
+> a batch job was accepted.
 
 ### 3.6 [BUG] Negative queue/server job counters  [DONE — fixed & live-tested]
 Root causes fixed:

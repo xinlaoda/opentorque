@@ -22,6 +22,12 @@ type Queue struct {
 	Enabled bool // Can accept new jobs
 	Started bool // Can run/route jobs
 
+	// Scheduling
+	Priority int // Queue scheduling priority (higher wins); 0 = default
+
+	// Job-type gate: queue rejects jobs whose type is in this list (see 3.5).
+	DisallowedTypes []string
+
 	// Limits
 	MaxJobs     int // Max total jobs in queue (0 = unlimited)
 	MaxRun      int // Max running jobs (0 = unlimited)

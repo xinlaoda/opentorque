@@ -2279,6 +2279,12 @@ func (s *Server) formatQueueStatus(q *queue.Queue) dis.StatusObject {
 	} else {
 		add("started", "False")
 	}
+	if q.Priority != 0 {
+		add("Priority", strconv.Itoa(q.Priority))
+	}
+	if len(q.DisallowedTypes) > 0 {
+		add("disallowed_types", strings.Join(q.DisallowedTypes, ","))
+	}
 	if q.MaxJobs > 0 {
 		add("max_queuable", strconv.Itoa(q.MaxJobs))
 	}
@@ -2879,8 +2885,8 @@ func (s *Server) applyQueueAttrs(q *queue.Queue, attrs []dis.SvrAttrl) {
 	// into one list per attribute instead of letting each entry overwrite the
 	// previous one (see TODO 3.1: route_destinations, acl_users, acl_groups,
 	// acl_hosts).
-	var aclUsers, aclGroups, aclHosts, routeDest []string
-	hasACLUsers, hasACLGroups, hasACLHosts, hasRouteDest := false, false, false, false
+	var aclUsers, aclGroups, aclHosts, routeDest, disallowed []string
+	hasACLUsers, hasACLGroups, hasACLHosts, hasRouteDest, hasDisallowed := false, false, false, false, false
 	for _, a := range attrs {
 		switch a.Name {
 		case "queue_type":
@@ -2893,6 +2899,14 @@ func (s *Server) applyQueueAttrs(q *queue.Queue, attrs []dis.SvrAttrl) {
 			q.Enabled = (a.Value == "True" || a.Value == "true" || a.Value == "1")
 		case "started":
 			q.Started = (a.Value == "True" || a.Value == "true" || a.Value == "1")
+		case "Priority":
+			fmt.Sscanf(a.Value, "%d", &q.Priority)
+		case "disallowed_types":
+			if !hasDisallowed {
+				disallowed = nil
+				hasDisallowed = true
+			}
+			disallowed = append(disallowed, queue.ParseList(a.Value)...)
 		case "max_queuable":
 			fmt.Sscanf(a.Value, "%d", &q.MaxJobs)
 		case "max_running":
@@ -2988,6 +3002,9 @@ func (s *Server) applyQueueAttrs(q *queue.Queue, attrs []dis.SvrAttrl) {
 	}
 	if hasRouteDest {
 		q.RouteDestin = routeDest
+	}
+	if hasDisallowed {
+		q.DisallowedTypes = disallowed
 	}
 }
 
@@ -4367,6 +4384,10 @@ func (s *Server) recoverQueues() {
 						fmt.Sscanf(val, "%d", &q.MaxJobs)
 					case "max_running":
 						fmt.Sscanf(val, "%d", &q.MaxRun)
+					case "Priority":
+						fmt.Sscanf(val, "%d", &q.Priority)
+					case "disallowed_types":
+						q.DisallowedTypes = queue.ParseList(val)
 					case "max_user_queuable":
 						fmt.Sscanf(val, "%d", &q.MaxUserJobs)
 					case "max_user_run":
@@ -4781,6 +4802,12 @@ func (s *Server) saveQueue(q *queue.Queue) {
 	}
 	if q.MaxRun > 0 {
 		sb.WriteString(fmt.Sprintf("max_running=%d\n", q.MaxRun))
+	}
+	if q.Priority != 0 {
+		sb.WriteString(fmt.Sprintf("Priority=%d\n", q.Priority))
+	}
+	if len(q.DisallowedTypes) > 0 {
+		sb.WriteString("disallowed_types=" + strings.Join(q.DisallowedTypes, ",") + "\n")
 	}
 	for resc, v := range q.ResourceMin {
 		sb.WriteString("resources_min." + resc + "=" + v + "\n")
