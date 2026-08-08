@@ -26,3 +26,13 @@ Thumbs.db
 *.log
 dist/
 /qmgr
+
+# Scratch / ad-hoc ops scripts and artifacts (deployment, live-test, diag)
+/_[^/]*
+/do-ssh-test.ps1
+*.err
+*.patch
+/step.txt
+/marker.txt
+/sshout.txt
+/ssh-debug.txt
