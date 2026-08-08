@@ -18,6 +18,7 @@ type Config struct {
 	// Scheduling policy flags
 	SchedulerMode     string        // "builtin" or "external"
 	StrictFIFO        bool          // Block all jobs behind first unrunnable
+	Backfill          bool          // Run later (fittable) jobs while the head job is blocked (2.2)
 	RoundRobin        bool          // Cycle through queues
 	ByQueue           bool          // Process queues in priority order
 	FairShare         bool          // Enable fair-share scheduling
@@ -53,6 +54,7 @@ func DefaultConfig(pbsHome string) *Config {
 		PBSHome:           pbsHome,
 		SchedulerMode:     "external",
 		StrictFIFO:        false,
+		Backfill:          true,
 		RoundRobin:        false,
 		ByQueue:           true,
 		FairShare:         false,
@@ -113,6 +115,8 @@ func Load(pbsHome string) *Config {
 			cfg.SchedulerMode = val
 		case "strict_fifo":
 			cfg.StrictFIFO = parseBool(val)
+		case "backfill":
+			cfg.Backfill = parseBool(val)
 		case "round_robin":
 			cfg.RoundRobin = parseBool(val)
 		case "by_queue":

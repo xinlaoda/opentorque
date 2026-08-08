@@ -290,3 +290,28 @@ func TestQueueNodeOKExclusive(t *testing.T) {
 		t.Fatalf("shared should allow both idle and busy nodes")
 	}
 }
+
+func TestStrictStop(t *testing.T) {
+	// strict FIFO without backfill halts on the first blocked job.
+	s := New(config.DefaultConfig(""))
+	s.cfg.StrictFIFO = true
+	s.cfg.Backfill = false
+	if !s.strictStop() {
+		t.Fatalf("strict_fifo + backfill=false should stop")
+	}
+	// with backfill enabled, strict FIFO does not halt.
+	s.cfg.Backfill = true
+	if s.strictStop() {
+		t.Fatalf("strict_fifo + backfill=true should not stop")
+	}
+	// non-strict FIFO never halts.
+	s.cfg.StrictFIFO = false
+	s.cfg.Backfill = false
+	if s.strictStop() {
+		t.Fatalf("non-strict should never stop")
+	}
+	// backfill defaults ON.
+	if d := config.DefaultConfig(""); !d.Backfill {
+		t.Fatalf("default backfill should be true")
+	}
+}

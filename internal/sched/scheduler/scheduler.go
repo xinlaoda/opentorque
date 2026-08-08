@@ -279,9 +279,12 @@ func (s *Scheduler) runCycle(conn *client.Conn, limited bool) (*CycleResult, err
 				log.Printf("[SCHED] Cloud queue %s: job %s needs %d cores, no node available (blocked=%d)", q.Name, jinfo.ID, cpu, ev.Blocked)
 				continue // do NOT break; keep looking across remaining jobs
 			}
-			// Non-cloud strict FIFO: stop after first blocked job.
-			if s.cfg.StrictFIFO {
-				log.Printf("[SCHED] Strict FIFO: job %s blocked, stopping cycle", jinfo.ID)
+			// Non-cloud FIFO: stop after the first blocked job unless backfill is
+			// enabled, in which case later jobs that fit the current free capacity
+			// are allowed to run (easy backfill). A blocked head job could not run
+			// now anyway, so running a fitting job in the gap does not delay it.
+			if s.strictStop() {
+				log.Printf("[SCHED] Strict FIFO (no backfill): job %s blocked, stopping cycle", jinfo.ID)
 				break
 			}
 			continue
@@ -656,6 +659,12 @@ func (it *jobIterator) nextFlat() *JobInfo {
 }
 
 // findNodeForJob selects the best available node for a job.
+// strictStop reports whether the scheduler must halt on the first blocked job.
+// Pure strict FIFO blocks; when backfill is enabled the scheduler continues to
+// later fittable jobs even in otherwise-strict mode (2.2).
+func (s *Scheduler) strictStop() bool {
+	return s.cfg.StrictFIFO && !s.cfg.Backfill
+}
 // countSchedulableForJob returns how many distinct schedulable nodes satisfy
 // the job's placement constraints (host / host group / feature) with at least
 // reqCPUs free. Used to gate multi-node dispatch (1.4).
