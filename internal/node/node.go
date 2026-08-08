@@ -4,6 +4,7 @@ package node
 import (
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 )
@@ -62,6 +63,7 @@ type Node struct {
 
 	// Properties and features
 	Properties []string // Node properties (for node selection)
+	Groups     []string // named host groups / node pools this node belongs to (1.3)
 	Note       string   // Administrator note
 	Queue      string   // optional pool/queue ownership (per-pool free-cores)
 
@@ -139,6 +141,18 @@ func (n *Node) IsFree() bool {
 // IsDown returns true if the node is unreachable.
 func (n *Node) IsDown() bool {
 	return n.State&StateDown != 0
+}
+
+// HasGroup reports whether the node belongs to the named host group / pool
+// (case-insensitive). A node with no explicit groups is not a member of any
+// group, so a job pinning to a group will not land on it.
+func (n *Node) HasGroup(g string) bool {
+	for _, grp := range n.Groups {
+		if strings.EqualFold(strings.TrimSpace(grp), g) {
+			return true
+		}
+	}
+	return false
 }
 
 // AvailableSlots returns the number of free execution slots.

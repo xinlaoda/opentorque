@@ -38,10 +38,18 @@ attrs, `parseJobInfo` reads `-l feature/features/properties` into
   `qsub -l feature=gpu ncpus=1` dispatched to `xxin-opentorque-srv/0` and
   reached `R`; `qsub -l feature=missing ncpus=1` stayed `Q` (no node has it).
 
-### 1.3 Host groups / host tags / node pools  [GAP]
-No notion of grouping nodes (equivalent of PBS `hostgroup`, host tags, or node
-pools) exists at the job or queue level. Only the flat `ServerInfo.Nodes` list
-is considered.
+### 1.3 Host groups / host tags / node pools  [DONE — implemented & tested]
+Nodes now carry a named host-group / node-pool membership (`node.Node.Groups`,
+stat attr `hostgroups`, persisted in `server_priv/nodes` as `groups=`). Nodes
+are assigned to groups via `qmgr set node <name> hostgroups=gpu,fast`. A job
+pins to a group with `-l host=@<group>`; both the built-in scheduler
+(`Server.selectNodeForJob`, `internal/server/server.go`) and the external
+scheduler (`findNodeForJob`, `internal/sched/scheduler/scheduler.go`) restrict
+candidates to nodes in the requested group. Static (local) nodes remain
+preferred over dynamic (cloud) nodes within a group.
+- Unit tests: `TestFindNodeForJobHostGroup` (external) and node `HasGroup`.
+- Caveat: PBS hostgroups are typically declared server-side and shared across
+  nodes; here membership is stored on each node (equivalent for scheduling).
 
 ### 1.4 `nodes=N:ppn=M` / `select=` / `place=` true multi-node placement  [GAP]
 `-l nodes=` is parsed only as an approximation of `CPUReq` (a single integer)

@@ -2522,6 +2522,9 @@ func (s *Server) formatNodeStatus(n *node.Node) dis.StatusObject {
 	if len(n.Properties) > 0 {
 		add("properties", strings.Join(n.Properties, ","))
 	}
+	if len(n.Groups) > 0 {
+		add("hostgroups", strings.Join(n.Groups, ","))
+	}
 	if n.Note != "" {
 		add("note", n.Note)
 	}
@@ -3178,6 +3181,8 @@ func (s *Server) applyNodeAttrs(n *node.Node, attrs []dis.SvrAttrl) {
 			n.SlotsTotal = n.NumProcs
 		case "properties":
 			n.Properties = strings.Split(a.Value, ",")
+		case "hostgroups", "groups":
+			n.Groups = queue.ParseList(a.Value)
 		case "note":
 			n.Note = a.Value
 		case "queue":
@@ -3517,6 +3522,74 @@ func (s *Server) resolveDependencies(completedJobID string, exitStatus int) {
 }
 
 // scheduleJob attempts to place a single job on a compute node and dispatch it.
+// nodeHasAllFeatures reports whether node n carries every required property.
+func nodeHasAllFeatures(n *node.Node, want []string) bool {
+	for _, f := range want {
+		found := false
+		for _, p := range n.Properties {
+			if strings.EqualFold(strings.TrimSpace(p), f) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// selectNodeForJob picks a schedulable node honoring the job's host pin
+// (-l host=<node>), host group (-l host=@group, 1.3), and feature requirements
+// (-l feature=a,b), with at least neededSlots free CPUs. Local (static) nodes
+// are preferred over auto-registered cloud/dynamic nodes so cloud burst is only
+// used when local capacity is exhausted. Returns the node and slots to
+// allocate, or nil if no node qualifies.
+func (s *Server) selectNodeForJob(j *job.Job, neededSlots int) (*node.Node, int) {
+	host := strings.TrimSpace(j.ResourceReq["host"])
+	group := ""
+	if strings.HasPrefix(host, "@") {
+		group = strings.TrimPrefix(host, "@")
+		host = ""
+	}
+	var feats []string
+	for _, k := range []string{"feature", "features", "properties"} {
+		if v := j.ResourceReq[k]; v != "" {
+			feats = append(feats, queue.ParseList(v)...)
+		}
+	}
+	var best *node.Node
+	bestDyn := false
+	bestAvail := -1
+	for _, n := range s.nodeMgr.AllNodes() {
+		n.Mu.RLock()
+		ok := n.IsFree() && n.AvailableSlots() >= neededSlots
+		if ok && host != "" && !strings.EqualFold(n.Name, host) {
+			ok = false
+		}
+		if ok && group != "" && !n.HasGroup(group) {
+			ok = false
+		}
+		if ok && len(feats) > 0 && !nodeHasAllFeatures(n, feats) {
+			ok = false
+		}
+		dyn := n.Dynamic
+		avail := n.AvailableSlots()
+		n.Mu.RUnlock()
+		if !ok {
+			continue
+		}
+		if best == nil || (!dyn && bestDyn) || (dyn == bestDyn && avail < bestAvail) {
+			best = n
+			bestDyn = dyn
+			bestAvail = avail
+		}
+	}
+	if best == nil {
+		return nil, 0
+	}
+	return best, neededSlots
+}
 func (s *Server) scheduleJob(j *job.Job) bool {
 	j.Mu.RLock()
 	if j.State != job.StateQueued {
@@ -3539,7 +3612,7 @@ func (s *Server) scheduleJob(j *job.Job) bool {
 	// actual requested CPUs (default 1) so node capacity is accounted per
 	// CPUReq instead of per job (see TODO 2.6).
 	neededSlots := jobRequestedCPUs(j)
-	n, slots := s.nodeMgr.FindNodeForJob(neededSlots)
+	n, slots := s.selectNodeForJob(j, neededSlots)
 	if n == nil {
 		return false // No free nodes, try again next cycle
 	}
@@ -4608,8 +4681,17 @@ func (s *Server) recoverNodes() {
 			}
 		}
 		nn := s.nodeMgr.AddNode(nodeName, np)
+		var groups []string
+		for _, p := range parts[1:] {
+			if strings.HasPrefix(p, "groups=") {
+				groups = queue.ParseList(p[len("groups="):])
+			}
+		}
 		if qname != "" {
 			nn.Queue = qname
+		}
+		if len(groups) > 0 {
+			nn.Groups = groups
 		}
 		if dynamic {
 			nn.Dynamic = true
@@ -5019,6 +5101,9 @@ func (s *Server) saveNodes() {
 		}
 		if n.Dynamic {
 			extra += " dynamic=1"
+		}
+		if len(n.Groups) > 0 {
+			extra += " groups=" + strings.Join(n.Groups, ",")
 		}
 		sb.WriteString(fmt.Sprintf("%s np=%d%s\n", n.Name, n.NumProcs, extra))
 		n.Mu.RUnlock()

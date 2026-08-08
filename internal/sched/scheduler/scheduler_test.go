@@ -182,3 +182,31 @@ func TestFindNodeForJobCloudFallback(t *testing.T) {
 		t.Fatalf("expected fallback to cloud1, got %+v", got)
 	}
 }
+
+
+func TestFindNodeForJobHostGroup(t *testing.T) {
+	s := newTestScheduler()
+	sinfo := &ServerInfo{Nodes: []*NodeInfo{
+		{Name: "gpu1", State: "free", FreeCPUs: 4, Groups: []string{"gpu"}},
+		{Name: "gpu2", State: "free", FreeCPUs: 8, Groups: []string{"gpu", "fast"}},
+		{Name: "cpu1", State: "free", FreeCPUs: 16, Groups: []string{"cpu"}},
+		{Name: "none", State: "free", FreeCPUs: 32},
+	}}
+	// Pin to @gpu: only gpu1/gpu2 qualify, best fit picks gpu1.
+	j := &JobInfo{ID: "1", CPUReq: 2, HostGroup: "gpu"}
+	got := s.findNodeForJob(sinfo, j)
+	if got == nil || got.Name != "gpu1" {
+		t.Fatalf("expected gpu1 for @gpu, got %+v", got)
+	}
+	// Pin to @fast: only gpu2 qualifies even though cpu1 has more free cpus.
+	j.HostGroup = "fast"
+	got = s.findNodeForJob(sinfo, j)
+	if got == nil || got.Name != "gpu2" {
+		t.Fatalf("expected gpu2 for @fast, got %+v", got)
+	}
+	// Group pin must not match a node outside the group despite free capacity.
+	j.HostGroup = "missing"
+	if got := s.findNodeForJob(sinfo, j); got != nil {
+		t.Fatalf("expected nil for @missing, got %+v", got)
+	}
+}

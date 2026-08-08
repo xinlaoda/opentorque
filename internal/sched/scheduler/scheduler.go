@@ -29,6 +29,7 @@ type JobInfo struct {
 	MemReq    int64    // requested memory in KB
 	CPUReq    int      // requested CPUs
 	Host      string   // -l host=<node> pinning (empty = anywhere)
+	HostGroup string   // -l host=@<group> pin to a host group / node pool (1.3)
 	Features  []string // -l feature=<list> required node properties
 
 	// Scheduling state
@@ -49,6 +50,7 @@ type NodeInfo struct {
 	Jobs       []string
 	UsedCPUs   int      // CPUs currently consumed by running jobs (from node used_cpus)
 	Properties []string // node properties/features used for feature matching
+	Groups     []string // named host groups / node pools this node belongs to (1.3)
 	Dynamic    bool     // auto-registered cloud/dynamic node (prefer local statics)
 }
 
@@ -689,6 +691,10 @@ func (s *Scheduler) findNodeForJob(sinfo *ServerInfo, jinfo *JobInfo) *NodeInfo 
 		if len(jinfo.Features) > 0 && !nodeHasAllFeatures(n, jinfo.Features) {
 			continue
 		}
+		// Host group / node pool: -l host=@<group> requires membership in the group.
+		if jinfo.HostGroup != "" && !nodeHasGroup(n, jinfo.HostGroup) {
+			continue
+		}
 		if n.FreeCPUs >= cpuReq {
 			candidates = append(candidates, n)
 		}
@@ -725,6 +731,16 @@ func (s *Scheduler) findNodeForJob(sinfo *ServerInfo, jinfo *JobInfo) *NodeInfo 
 func isRouteQueue(q *QueueInfo) bool {
 	t := strings.ToLower(strings.TrimSpace(q.Type))
 	return t == "route" || t == "r"
+}
+
+// nodeHasGroup reports whether node n belongs to the named host group / pool.
+func nodeHasGroup(n *NodeInfo, g string) bool {
+	for _, grp := range n.Groups {
+		if strings.EqualFold(strings.TrimSpace(grp), g) {
+			return true
+		}
+	}
+	return false
 }
 
 // nodeHasAllFeatures reports whether node n carries every property in want.
@@ -782,7 +798,11 @@ func parseJobInfo(obj client.StatusObject) *JobInfo {
 				j.CPUReq = n
 			}
 		case "Resource_List.host":
-			j.Host = a.Value
+			if strings.HasPrefix(strings.TrimSpace(a.Value), "@") {
+				j.HostGroup = strings.TrimPrefix(strings.TrimSpace(a.Value), "@")
+			} else {
+				j.Host = a.Value
+			}
 		case "Resource_List.feature", "Resource_List.features", "Resource_List.properties":
 			for _, f := range strings.Split(a.Value, ",") {
 				if f = strings.TrimSpace(f); f != "" {
@@ -838,6 +858,12 @@ func parseNodeInfo(obj client.StatusObject) *NodeInfo {
 			for _, p := range strings.Split(a.Value, ",") {
 				if p = strings.TrimSpace(p); p != "" {
 					n.Properties = append(n.Properties, p)
+				}
+			}
+		case "hostgroups", "groups":
+			for _, g := range strings.Split(a.Value, ",") {
+				if g = strings.TrimSpace(g); g != "" {
+					n.Groups = append(n.Groups, g)
 				}
 			}
 		case "is_dynamic":
