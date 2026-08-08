@@ -1148,6 +1148,16 @@ func (s *Server) handleRunJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestHead
 			return true
 		}
 
+		// Multi-node job (-l nodes=N:ppn=M): the external scheduler anchors on
+		// this node and the server completes the full set, dispatching to every
+		// node. If not enough distinct nodes are free yet, the job stays queued
+		// for the next cycle. Falls through to the single-node path when nodes==1.
+		if nodeCount, ppn := s.jobNodeRequest(j); nodeCount > 1 {
+			s.runJobMulti(j, n, nodeCount, ppn)
+			dis.SendOkReply(conn)
+			return true
+		}
+
 		// Reserve slots on the specified node and dispatch (consume the job's
 		// actual requested CPUs so capacity is accounted per CPUReq — TODO 2.6)
 		n.Mu.Lock()
@@ -2541,6 +2551,13 @@ func (s *Server) formatNodeStatus(n *node.Node) dis.StatusObject {
 func jobRequestedCPUs(j *job.Job) int {
 	j.Mu.RLock()
 	defer j.Mu.RUnlock()
+	// A nodes=/select= request accounts its ppn (processors per node) on each
+	// allocated node, not the total across nodes.
+	if spec := j.ResourceReq["nodes"]; spec != "" {
+		if _, ppn := parseNodeSelectSpec(spec); ppn > 0 {
+			return ppn
+		}
+	}
 	if v, ok := j.ResourceReq["ncpus"]; ok {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
@@ -3590,6 +3607,155 @@ func (s *Server) selectNodeForJob(j *job.Job, neededSlots int) (*node.Node, int)
 	}
 	return best, neededSlots
 }
+// parseNodeSelectSpec parses a TORQUE-style node request into a node count and
+// processors-per-node (ppn). It accepts:
+//   "" or "1"           -> 1 node, 1 ppn
+//   "N"                 -> N nodes, 1 ppn
+//   "N:ppn=M"           -> N nodes, M ppn
+//   "N:ppn=M+R:ppn=S"   -> uses the first chunk (heterogeneous layouts are
+//                          reduced to the first chunk's N x ppn; a follow-up)
+// Returns nodes>=1, ppn>=1.
+func parseNodeSelectSpec(spec string) (nodes, ppn int) {
+	nodes, ppn = 1, 1
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return
+	}
+	first := strings.Split(spec, "+")[0]
+	parts := strings.Split(first, ":")
+	if n, err := strconv.Atoi(strings.TrimSpace(parts[0])); err == nil && n > 0 {
+		nodes = n
+	}
+	for _, kv := range parts[1:] {
+		kv = strings.TrimSpace(kv)
+		if strings.HasPrefix(kv, "ppn=") {
+			if m, err := strconv.Atoi(strings.TrimSpace(kv[4:])); err == nil && m > 0 {
+				ppn = m
+			}
+		}
+	}
+	return
+}
+
+// jobNodeRequest returns the job's multi-node layout (nodes, ppn) from
+// Resource_List.nodes / Resource_List.select, or (1, ppn/ncpus) for a plain
+// single-node job.
+func (s *Server) jobNodeRequest(j *job.Job) (nodes, ppn int) {
+	j.Mu.RLock()
+	spec := j.ResourceReq["nodes"]
+	if spec == "" {
+		spec = j.ResourceReq["select"]
+	}
+	j.Mu.RUnlock()
+	if spec == "" {
+		return 1, jobRequestedCPUs(j)
+	}
+	n, pp := parseNodeSelectSpec(spec)
+	return n, pp
+}
+
+// selectNodesForJob picks up to nodeCount distinct schedulable nodes, each with
+// at least ppn free CPUs, honoring the job's host pin, host group, and feature
+// constraints. Returns nil when fewer than nodeCount distinct nodes qualify.
+func (s *Server) selectNodesForJob(j *job.Job, nodeCount, ppn int) []*node.Node {
+	host := ""
+	group := ""
+	{
+		j.Mu.RLock()
+		h := strings.TrimSpace(j.ResourceReq["host"])
+		j.Mu.RUnlock()
+		if strings.HasPrefix(h, "@") {
+			group = strings.TrimPrefix(h, "@")
+		} else {
+			host = h
+		}
+	}
+	var feats []string
+	j.Mu.RLock()
+	for _, k := range []string{"feature", "features", "properties"} {
+		if v := j.ResourceReq[k]; v != "" {
+			feats = append(feats, queue.ParseList(v)...)
+		}
+	}
+	// place=pack (default) packs onto fewer nodes; only a plain count matters
+	// here since we take the first nodeCount that qualify.
+	j.Mu.RUnlock()
+
+	var out []*node.Node
+	for _, n := range s.nodeMgr.AllNodes() {
+		n.Mu.RLock()
+		ok := n.IsFree() && n.AvailableSlots() >= ppn
+		if ok && host != "" && !strings.EqualFold(n.Name, host) {
+			ok = false
+		}
+		if ok && group != "" && !n.HasGroup(group) {
+			ok = false
+		}
+		if ok && len(feats) > 0 && !nodeHasAllFeatures(n, feats) {
+			ok = false
+		}
+		n.Mu.RUnlock()
+		if ok {
+			out = append(out, n)
+			if len(out) >= nodeCount {
+				break
+			}
+		}
+	}
+	if len(out) < nodeCount {
+		return nil
+	}
+	return out
+}
+
+// scheduleJobMulti allocates a multi-node job across nodeCount distinct nodes
+// (each with ppn free CPUs), records a multi-node exec_host, and dispatches the
+// job to every allocated node's MOM. Assumes dependency/run-limit checks passed.
+func (s *Server) scheduleJobMulti(j *job.Job, nodeCount, ppn int) bool {
+	selected := s.selectNodesForJob(j, nodeCount, ppn)
+	if len(selected) < nodeCount {
+		return false // not enough distinct nodes yet, try again next cycle
+	}
+	hosts := make([]string, 0, nodeCount)
+	for _, n := range selected {
+		hosts = append(hosts, n.Name+"/0")
+	}
+	execHost := strings.Join(hosts, "+")
+	momPort := selected[0].MomPort
+
+	j.Mu.Lock()
+	j.ExecHost = execHost
+	j.ExecPort = momPort
+	j.NodeCount = nodeCount
+	j.TaskCount = nodeCount * ppn
+	oldState := j.State
+	queueName := j.Queue
+	j.Mu.Unlock()
+
+	for _, n := range selected {
+		n.Mu.Lock()
+		n.AssignJob(j.ID, ppn)
+		n.Mu.Unlock()
+	}
+
+	s.jobMgr.UpdateJobState(j.ID, job.StateRunning, job.SubstateRunning)
+	if q := s.queueMgr.GetQueue(queueName); q != nil {
+		q.TransferJobState(oldState, job.StateRunning)
+	}
+	s.saveJob(j)
+
+	log.Printf("[SCHED] Dispatching multi-node job %s to %d nodes: %s", j.ID, nodeCount, execHost)
+	if s.acctLog != nil {
+		j.Mu.RLock()
+		info := s.buildJobInfo(j)
+		j.Mu.RUnlock()
+		s.acctLog.RecordStarted(j.ID, info)
+	}
+	for _, n := range selected {
+		go s.dispatchJobToMOM(j, n)
+	}
+	return true
+}
 func (s *Server) scheduleJob(j *job.Job) bool {
 	j.Mu.RLock()
 	if j.State != job.StateQueued {
@@ -3608,9 +3774,15 @@ func (s *Server) scheduleJob(j *job.Job) bool {
 		return false // Limits exceeded, try again next cycle
 	}
 
-	// Find a node with enough free CPU slots for this job. Consume the job's
-	// actual requested CPUs (default 1) so node capacity is accounted per
-	// CPUReq instead of per job (see TODO 2.6).
+	// Multi-node request (-l nodes=N:ppn=M / select=): allocate N distinct nodes.
+	nodes, ppn := s.jobNodeRequest(j)
+	if nodes > 1 {
+		return s.scheduleJobMulti(j, nodes, ppn)
+	}
+
+	// Single-node path: find a node with enough free CPU slots for this job.
+	// Consume the job's actual requested CPUs (default 1) so node capacity is
+	// accounted per CPUReq instead of per job (see TODO 2.6).
 	neededSlots := jobRequestedCPUs(j)
 	n, slots := s.selectNodeForJob(j, neededSlots)
 	if n == nil {
@@ -3658,6 +3830,67 @@ func (s *Server) scheduleJob(j *job.Job) bool {
 	return true
 }
 
+// runJobMulti allocates a multi-node job anchored on firstNode (the node chosen
+// by the external scheduler), filling remaining nodes from the free pool. It
+// records a multi-node exec_host, assigns each node, and dispatches to every
+// node's MOM. Returns false when not enough distinct nodes are free (job stays
+// queued for the next cycle).
+func (s *Server) runJobMulti(j *job.Job, firstNode *node.Node, nodeCount, ppn int) bool {
+	selected := []*node.Node{firstNode}
+	used := map[string]bool{firstNode.Name: true}
+	for _, n := range s.nodeMgr.AllNodes() {
+		if len(selected) >= nodeCount {
+			break
+		}
+		if used[n.Name] {
+			continue
+		}
+		n.Mu.RLock()
+		ok := n.IsFree() && n.AvailableSlots() >= ppn
+		n.Mu.RUnlock()
+		if ok {
+			selected = append(selected, n)
+			used[n.Name] = true
+		}
+	}
+	if len(selected) < nodeCount {
+		return false
+	}
+	hosts := make([]string, 0, nodeCount)
+	for _, n := range selected {
+		hosts = append(hosts, n.Name+"/0")
+	}
+	execHost := strings.Join(hosts, "+")
+	for _, n := range selected {
+		n.Mu.Lock()
+		n.AssignJob(j.ID, ppn)
+		n.Mu.Unlock()
+	}
+	j.Mu.Lock()
+	j.ExecHost = execHost
+	j.ExecPort = firstNode.MomPort
+	j.NodeCount = nodeCount
+	j.TaskCount = nodeCount * ppn
+	oldState := j.State
+	queueName := j.Queue
+	j.SetState(job.StateRunning, job.SubstateRunning)
+	j.Mu.Unlock()
+	if q := s.queueMgr.GetQueue(queueName); q != nil {
+		q.TransferJobState(oldState, job.StateRunning)
+	}
+	s.saveJob(j)
+	log.Printf("[SERVER] RunJob(ext) multi-node %s -> %d nodes: %s", j.ID, nodeCount, execHost)
+	if s.acctLog != nil {
+		j.Mu.RLock()
+		info := s.buildJobInfo(j)
+		j.Mu.RUnlock()
+		s.acctLog.RecordStarted(j.ID, info)
+	}
+	for _, n := range selected {
+		go s.dispatchJobToMOM(j, n)
+	}
+	return true
+}
 // dispatchJobToMOM sends a job (QueueJob + JobScript + Commit) to a MOM daemon.
 // This follows the same protocol sequence that the C pbs_server uses.
 func (s *Server) dispatchJobToMOM(j *job.Job, n *node.Node) {

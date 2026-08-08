@@ -210,3 +210,49 @@ func TestFindNodeForJobHostGroup(t *testing.T) {
 		t.Fatalf("expected nil for @missing, got %+v", got)
 	}
 }
+
+func TestParseNodeSelectSpec(t *testing.T) {
+	cases := []struct {
+		spec        string
+		wantNodes   int
+		wantPPN     int
+	}{
+		{"", 1, 1},
+		{"1", 1, 1},
+		{"4", 4, 1},
+		{"4:ppn=2", 4, 2},
+		{"8:ppn=4", 8, 4},
+		{"2:ppn=2+4:ppn=1", 2, 2}, // heterogeneous: first chunk wins
+	}
+	for _, c := range cases {
+		n, p := parseNodeSelectSpec(c.spec)
+		if n != c.wantNodes || p != c.wantPPN {
+			t.Errorf("parseNodeSelectSpec(%q)=(%d,%d) want (%d,%d)", c.spec, n, p, c.wantNodes, c.wantPPN)
+		}
+	}
+}
+
+func TestFindNodeForJobMultiNode(t *testing.T) {
+	s := newTestScheduler()
+	sinfo := &ServerInfo{Nodes: []*NodeInfo{
+		{Name: "n1", State: "free", FreeCPUs: 4},
+		{Name: "n2", State: "free", FreeCPUs: 4},
+	}}
+	// Nodes=2 ppn=2 -> enough distinct nodes, returns an anchor node.
+	j := &JobInfo{ID: "1", CPUReq: 2, Nodes: 2, PPN: 2}
+	if got := s.findNodeForJob(sinfo, j); got == nil {
+		t.Fatalf("expected an anchor node for 2-node request, got nil")
+	}
+	// Nodes=3 distinct requested but only 2 free -> blocked (nil).
+	j.Nodes = 3
+	if got := s.findNodeForJob(sinfo, j); got != nil {
+		t.Fatalf("expected nil when fewer distinct nodes than requested, got %+v", got)
+	}
+	// A greedy node alone cannot satisfy N>1 even if it has the aggregate cpus.
+	sinfo2 := &ServerInfo{Nodes: []*NodeInfo{{Name: "big", State: "free", FreeCPUs: 8}}}
+	j.Nodes = 2
+	j.PPN = 4
+	if got := s.findNodeForJob(sinfo2, j); got != nil {
+		t.Fatalf("expected nil when one node holds all cpus but 2 distinct nodes needed, got %+v", got)
+	}
+}

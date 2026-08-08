@@ -51,11 +51,26 @@ preferred over dynamic (cloud) nodes within a group.
 - Caveat: PBS hostgroups are typically declared server-side and shared across
   nodes; here membership is stored on each node (equivalent for scheduling).
 
-### 1.4 `nodes=N:ppn=M` / `select=` / `place=` true multi-node placement  [GAP]
-`-l nodes=` is parsed only as an approximation of `CPUReq` (a single integer)
-and `ncpus=` likewise. There is no real multi-node allocation, no per-node
-processor request (`ppn`), and no `select`/`place` chunk model. Jobs never span
-more than one node.
+### 1.4 `nodes=N:ppn=M` / `select=` / `place=` true multi-node placement  [DONE - implemented & tested]
+Real multi-node allocation is implemented in both scheduling paths.
+- Parse `-l nodes=N:ppn=M` (and `select=N:ppn=M`) into a node count + ppn
+  (`parseNodeSelectSpec` in both `internal/server` and
+  `internal/sched/scheduler`); `nodes=` is no longer collapsed into a single
+  `CPUReq`.
+- Built-in scheduler: `scheduleJobMulti` allocates N distinct schedulable nodes
+  (each with >= ppn free, honoring host/group/feature), records a `+`-joined
+  multi-node `exec_host`, counts per-node CPU, and dispatches the job to every
+  allocated node MOM. `node.Node.AssignJob` accounts ppn on each node.
+- External scheduler: `findNodeForJob` gates on `countSchedulableForJob` (N
+  distinct nodes each with >= ppn free); dispatch anchors on the first node and
+  `Server.runJobMulti` completes the set and dispatches to all nodes.
+- MOM already emits `PBS_NODEFILE`/`PBS_NODELIST` from the multi-node
+  `exec_host` (each node listed once; touching every node).
+- Unit tests: `TestParseNodeSelectSpec`, `TestFindNodeForJobMultiNode`.
+- Caveats: `place=` (pack/scatter) is parsed for single-chunk layouts but only
+  pack (fewest nodes) is honored; heterogeneous `N:ppn=M+R:ppn=S` reduces to the
+  first chunk; true mother/superior task fan-out via `pbsdsh` remains a
+  follow-up (each node runs the full script - sleep/independent jobs work).
 
 ### 1.5 Queue node-affinity (queue `naccesspolicy`)  [GAP]
 No equivalent of PBS `naccesspolicy` (shared / sharing-exclusive / exclhost) or

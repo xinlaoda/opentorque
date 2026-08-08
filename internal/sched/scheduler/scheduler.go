@@ -31,6 +31,8 @@ type JobInfo struct {
 	Host      string   // -l host=<node> pinning (empty = anywhere)
 	HostGroup string   // -l host=@<group> pin to a host group / node pool (1.3)
 	Features  []string // -l feature=<list> required node properties
+	Nodes     int      // requested node count from -l nodes=/select= (1 for single) (1.4)
+	PPN       int      // requested processors per node (1.4, default 1)
 
 	// Scheduling state
 	CanNotRun     bool
@@ -650,6 +652,30 @@ func (it *jobIterator) nextFlat() *JobInfo {
 }
 
 // findNodeForJob selects the best available node for a job.
+// countSchedulableForJob returns how many distinct schedulable nodes satisfy
+// the job's placement constraints (host / host group / feature) with at least
+// reqCPUs free. Used to gate multi-node dispatch (1.4).
+func (s *Scheduler) countSchedulableForJob(sinfo *ServerInfo, jinfo *JobInfo, reqCPUs int) int {
+	n := 0
+	for _, node := range sinfo.Nodes {
+		if !nodeSchedulable(node) {
+			continue
+		}
+		if jinfo.Host != "" && !strings.EqualFold(node.Name, jinfo.Host) {
+			continue
+		}
+		if jinfo.HostGroup != "" && !nodeHasGroup(node, jinfo.HostGroup) {
+			continue
+		}
+		if len(jinfo.Features) > 0 && !nodeHasAllFeatures(node, jinfo.Features) {
+			continue
+		}
+		if node.FreeCPUs >= reqCPUs {
+			n++
+		}
+	}
+	return n
+}
 // nodeSchedulable reports whether a node may accept new jobs. Free nodes are
 // schedulable; nodes that are draining, exclusive/offline/down/busy are not;
 // a node already running a job (job-exclusive) may still take more jobs if it
@@ -676,6 +702,18 @@ func (s *Scheduler) findNodeForJob(sinfo *ServerInfo, jinfo *JobInfo) *NodeInfo 
 	cpuReq := jinfo.CPUReq
 	if cpuReq == 0 {
 		cpuReq = 1
+	}
+	// Multi-node (1.4): a job asking for N nodes must find N distinct
+	// schedulable nodes each with >= PPN free CPUs; otherwise it stays blocked
+	// (lec cloud lookahead runs normally). cpuReq below becomes the per-node ppn.
+	if jinfo.Nodes > 1 {
+		perNode := jinfo.PPN
+		if perNode == 0 {
+			perNode = cpuReq
+		}
+		if s.countSchedulableForJob(sinfo, jinfo, perNode) < jinfo.Nodes {
+			return nil
+		}
 	}
 
 	var candidates []*NodeInfo
@@ -794,8 +832,16 @@ func parseJobInfo(obj client.StatusObject) *JobInfo {
 		case "Resource_List.ncpus":
 			j.CPUReq, _ = strconv.Atoi(a.Value)
 		case "Resource_List.nodes":
-			if n, err := strconv.Atoi(a.Value); err == nil && n > 0 {
-				j.CPUReq = n
+			n, pp := parseNodeSelectSpec(a.Value)
+			j.Nodes = n
+			j.PPN = pp
+		case "Resource_List.select":
+			n, pp := parseNodeSelectSpec(a.Value)
+			j.Nodes = n
+			j.PPN = pp
+		case "Resource_List.ppn":
+			if p, err := strconv.Atoi(a.Value); err == nil && p > 0 {
+				j.PPN = p
 			}
 		case "Resource_List.host":
 			if strings.HasPrefix(strings.TrimSpace(a.Value), "@") {
@@ -939,6 +985,31 @@ func parseQueueInfo(obj client.StatusObject) *QueueInfo {
 		}
 	}
 	return q
+}
+
+// parseNodeSelectSpec parses a TORQUE node request ("N", "N:ppn=M", or a
+// select chunk) into a node count and processors-per-node. Returns nodes>=1,
+// ppn>=1.
+func parseNodeSelectSpec(spec string) (nodes, ppn int) {
+	nodes, ppn = 1, 1
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return
+	}
+	first := strings.Split(spec, "+")[0]
+	parts := strings.Split(first, ":")
+	if n, err := strconv.Atoi(strings.TrimSpace(parts[0])); err == nil && n > 0 {
+		nodes = n
+	}
+	for _, kv := range parts[1:] {
+		kv = strings.TrimSpace(kv)
+		if strings.HasPrefix(kv, "ppn=") {
+			if m, err := strconv.Atoi(strings.TrimSpace(kv[4:])); err == nil && m > 0 {
+				ppn = m
+			}
+		}
+	}
+	return
 }
 
 func parseWalltime(s string) time.Duration {
