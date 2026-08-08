@@ -67,6 +67,10 @@ type QueueInfo struct {
 	Running    int
 	Queued     int
 	Jobs       []*JobInfo
+	// NaccessPolicy: "shared" (default) packs; "exclusive"/"singleuser" allow
+	// one job per node (1.5). HostList restricts schedulable nodes (1.6).
+	NaccessPolicy string
+	HostList       []string
 
 	// Cloud elasticity (cloud-backed queues). When CloudBacked is true the
 	// queue's jobs may be scaled out onto dynamically provisioned VMs.
@@ -670,6 +674,9 @@ func (s *Scheduler) countSchedulableForJob(sinfo *ServerInfo, jinfo *JobInfo, re
 		if len(jinfo.Features) > 0 && !nodeHasAllFeatures(node, jinfo.Features) {
 			continue
 		}
+		if q := queueForJob(sinfo, jinfo.Queue); !queueNodeOK(q, node) {
+			continue
+		}
 		if node.FreeCPUs >= reqCPUs {
 			n++
 		}
@@ -733,6 +740,10 @@ func (s *Scheduler) findNodeForJob(sinfo *ServerInfo, jinfo *JobInfo) *NodeInfo 
 		if jinfo.HostGroup != "" && !nodeHasGroup(n, jinfo.HostGroup) {
 			continue
 		}
+		// Queue policy (1.5/1.6): hostlist node-pool binding + naccesspolicy.
+		if q := queueForJob(sinfo, jinfo.Queue); !queueNodeOK(q, n) {
+			continue
+		}
 		if n.FreeCPUs >= cpuReq {
 			candidates = append(candidates, n)
 		}
@@ -771,6 +782,42 @@ func isRouteQueue(q *QueueInfo) bool {
 	return t == "route" || t == "r"
 }
 
+// queueNodeOK reports whether node n may be scheduled for a job in queue q,
+// enforcing the queue hostlist (node-pool binding) and naccesspolicy (1.5/1.6).
+// A nil q (no queue / routing) allows any node.
+func queueNodeOK(q *QueueInfo, n *NodeInfo) bool {
+	if q == nil {
+		return true
+	}
+	if len(q.HostList) > 0 {
+		ok := false
+		for _, h := range q.HostList {
+			h = strings.TrimSpace(h)
+			if h == "" {
+				continue
+			}
+			if strings.HasPrefix(h, "@") {
+				if nodeHasGroup(n, strings.TrimPrefix(h, "@")) {
+					ok = true
+					break
+				}
+			} else if strings.EqualFold(n.Name, h) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+	switch q.NaccessPolicy {
+	case "exclusive", "singleuser", "exclhost", "exec_host_exclusive":
+		if len(n.Jobs) > 0 {
+			return false // only a fully idle node may take an exclusive job
+		}
+	}
+	return true
+}
 // nodeHasGroup reports whether node n belongs to the named host group / pool.
 func nodeHasGroup(n *NodeInfo, g string) bool {
 	for _, grp := range n.Groups {
@@ -945,6 +992,10 @@ func parseQueueInfo(obj client.StatusObject) *QueueInfo {
 			q.Running, _ = strconv.Atoi(a.Value)
 		case "state_count_queued":
 			q.Queued, _ = strconv.Atoi(a.Value)
+		case "naccesspolicy":
+			q.NaccessPolicy = strings.ToLower(strings.TrimSpace(a.Value))
+		case "hostlist":
+			q.HostList = append(q.HostList, strings.Split(a.Value, ",")...)
 		case "cloud_provider":
 			q.CloudProvider = a.Value
 			if a.Value != "" {

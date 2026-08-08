@@ -612,6 +612,14 @@ func (s *Server) handleQueueJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestHe
 		return false
 	}
 
+	// Queue-level submission-host ACL (1.6): when acl_host_enable is set, the
+	// submitting client host must be listed in the queue acl_hosts.
+	if !s.queueAllowsSubmitHost(queueName, j) {
+		log.Printf("[SERVER] Job %s rejected: submit host not in queue %s acl_hosts", jobID, queueName)
+		dis.SendErrorReply(conn, dis.PbsePerm, 0)
+		return false
+	}
+
 	// Store the job (transit state) pending further steps
 	s.jobMgr.AddJob(j)
 
@@ -2412,6 +2420,12 @@ func (s *Server) formatQueueStatus(q *queue.Queue) dis.StatusObject {
 	if len(q.ACLHosts) > 0 {
 		add("acl_hosts", strings.Join(q.ACLHosts, ","))
 	}
+	if q.NaccessPolicy != "" {
+		add("naccesspolicy", q.NaccessPolicy)
+	}
+	if len(q.HostList) > 0 {
+		add("hostlist", strings.Join(q.HostList, ","))
+	}
 	if len(q.RouteDestin) > 0 {
 		add("route_destinations", strings.Join(q.RouteDestin, ","))
 	}
@@ -2835,6 +2849,39 @@ func (s *Server) formatServerStatus() dis.StatusObject {
 
 // --- Enforcement Hooks ---
 
+// submitHostOf returns the submitting client host for a job from PBS_O_HOST,
+// falling back to the host portion of Job_Owner (user@host).
+func submitHostOf(j *job.Job) string {
+	j.Mu.RLock()
+	defer j.Mu.RUnlock()
+	if h, ok := j.VariableList["PBS_O_HOST"]; ok && h != "" {
+		return h
+	}
+	if idx := strings.Index(j.Owner, "@"); idx >= 0 {
+		return j.Owner[idx+1:]
+	}
+	return ""
+}
+
+// queueAllowsSubmitHost enforces a queue-level submission-host ACL (1.6): when
+// acl_host_enable is set and acl_hosts is non-empty, the submitting client host
+// must be listed. A nil queue, disabled ACL, or empty list allows submission.
+func (s *Server) queueAllowsSubmitHost(queueName string, j *job.Job) bool {
+	q := s.queueMgr.GetQueue(queueName)
+	if q == nil || !q.ACLHostEnabled || len(q.ACLHosts) == 0 {
+		return true
+	}
+	host := submitHostOf(j)
+	if host == "" {
+		return false
+	}
+	for _, h := range q.ACLHosts {
+		if strings.EqualFold(strings.TrimSpace(h), host) {
+			return true
+		}
+	}
+	return false
+}
 // enforceSubmitLimits checks ACLs and resource limits before accepting a job.
 func (s *Server) enforceSubmitLimits(j *job.Job, user string) error {
 	s.mu.RLock()
@@ -3047,8 +3094,8 @@ func (s *Server) applyQueueAttrs(q *queue.Queue, attrs []dis.SvrAttrl) {
 	// into one list per attribute instead of letting each entry overwrite the
 	// previous one (see TODO 3.1: route_destinations, acl_users, acl_groups,
 	// acl_hosts).
-	var aclUsers, aclGroups, aclHosts, routeDest, disallowed []string
-	hasACLUsers, hasACLGroups, hasACLHosts, hasRouteDest, hasDisallowed := false, false, false, false, false
+	var aclUsers, aclGroups, aclHosts, routeDest, disallowed, hostList []string
+	hasACLUsers, hasACLGroups, hasACLHosts, hasRouteDest, hasDisallowed, hasHostList := false, false, false, false, false, false
 	for _, a := range attrs {
 		switch a.Name {
 		case "queue_type":
@@ -3147,6 +3194,14 @@ func (s *Server) applyQueueAttrs(q *queue.Queue, attrs []dis.SvrAttrl) {
 				hasACLHosts = true
 			}
 			aclHosts = append(aclHosts, queue.ParseList(a.Value)...)
+		case "naccesspolicy":
+			q.NaccessPolicy = strings.ToLower(strings.TrimSpace(a.Value))
+		case "hostlist":
+			if !hasHostList {
+				hostList = nil
+				hasHostList = true
+			}
+			hostList = append(hostList, queue.ParseList(a.Value)...)
 		case "route_destinations", "route_destin":
 			if !hasRouteDest {
 				routeDest = nil
@@ -3167,6 +3222,9 @@ func (s *Server) applyQueueAttrs(q *queue.Queue, attrs []dis.SvrAttrl) {
 	}
 	if hasACLHosts {
 		q.ACLHosts = aclHosts
+	}
+	if hasHostList {
+		q.HostList = hostList
 	}
 	if hasRouteDest {
 		q.RouteDestin = routeDest
@@ -3556,6 +3614,41 @@ func nodeHasAllFeatures(n *node.Node, want []string) bool {
 	return true
 }
 
+// queueNodeOK reports whether node n may be scheduled for a job in queue q,
+// enforcing the queue hostlist (node-pool binding) and naccesspolicy (1.5/1.6).
+func queueNodeOK(q *queue.Queue, n *node.Node) bool {
+	if q == nil {
+		return true
+	}
+	if len(q.HostList) > 0 {
+		ok := false
+		for _, h := range q.HostList {
+			h = strings.TrimSpace(h)
+			if h == "" {
+				continue
+			}
+			if strings.HasPrefix(h, "@") {
+				if n.HasGroup(strings.TrimPrefix(h, "@")) {
+					ok = true
+					break
+				}
+			} else if strings.EqualFold(n.Name, h) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+	switch q.NaccessPolicy {
+	case "exclusive", "singleuser", "exclhost", "exec_host_exclusive":
+		if len(n.AssignedJobs) > 0 {
+			return false // only a fully idle node may take an exclusive job
+		}
+	}
+	return true
+}
 // selectNodeForJob picks a schedulable node honoring the job's host pin
 // (-l host=<node>), host group (-l host=@group, 1.3), and feature requirements
 // (-l feature=a,b), with at least neededSlots free CPUs. Local (static) nodes
@@ -3578,9 +3671,13 @@ func (s *Server) selectNodeForJob(j *job.Job, neededSlots int) (*node.Node, int)
 	var best *node.Node
 	bestDyn := false
 	bestAvail := -1
+	queuePolicy := s.queueMgr.GetQueue(j.Queue)
 	for _, n := range s.nodeMgr.AllNodes() {
 		n.Mu.RLock()
 		ok := n.IsFree() && n.AvailableSlots() >= neededSlots
+		if ok && !queueNodeOK(queuePolicy, n) {
+			ok = false
+		}
 		if ok && host != "" && !strings.EqualFold(n.Name, host) {
 			ok = false
 		}
@@ -3682,9 +3779,13 @@ func (s *Server) selectNodesForJob(j *job.Job, nodeCount, ppn int) []*node.Node 
 	j.Mu.RUnlock()
 
 	var out []*node.Node
+	queuePolicy := s.queueMgr.GetQueue(j.Queue)
 	for _, n := range s.nodeMgr.AllNodes() {
 		n.Mu.RLock()
 		ok := n.IsFree() && n.AvailableSlots() >= ppn
+		if ok && !queueNodeOK(queuePolicy, n) {
+			ok = false
+		}
 		if ok && host != "" && !strings.EqualFold(n.Name, host) {
 			ok = false
 		}
@@ -4870,6 +4971,10 @@ func (s *Server) recoverQueues() {
 						q.ACLHostEnabled = (val == "True")
 					case "acl_hosts":
 						q.ACLHosts = queue.ParseList(val)
+					case "naccesspolicy":
+						q.NaccessPolicy = val
+					case "hostlist":
+						q.HostList = queue.ParseList(val)
 					case "route_destinations":
 						q.RouteDestin = queue.ParseList(val)
 					case "from_route_only":
@@ -5256,6 +5361,12 @@ func (s *Server) saveQueue(q *queue.Queue) {
 	}
 	if len(q.ACLHosts) > 0 {
 		sb.WriteString("acl_hosts=" + strings.Join(q.ACLHosts, ",") + "\n")
+		if q.NaccessPolicy != "" {
+			sb.WriteString("naccesspolicy=" + q.NaccessPolicy + "\n")
+		}
+		if len(q.HostList) > 0 {
+			sb.WriteString("hostlist=" + strings.Join(q.HostList, ",") + "\n")
+		}
 	}
 	if len(q.RouteDestin) > 0 {
 		sb.WriteString("route_destinations=" + strings.Join(q.RouteDestin, ",") + "\n")

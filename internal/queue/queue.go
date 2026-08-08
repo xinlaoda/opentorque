@@ -46,6 +46,12 @@ type Queue struct {
 	ACLGroups       []string
 	ACLHostEnabled  bool
 	ACLHosts        []string
+	// Node selection policy (1.5): "shared" (default) packs multiple jobs per
+	// node; "exclusive" (and "singleuser") allow one job per node.
+	NaccessPolicy string
+	// HostList restricts which compute nodes (or @host groups) the queue may
+	// schedule onto (1.6). Empty = any node.
+	HostList []string
 
 	// Route queue settings
 	RouteDestin []string // Destination queues for routing

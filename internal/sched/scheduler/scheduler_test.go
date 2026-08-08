@@ -256,3 +256,37 @@ func TestFindNodeForJobMultiNode(t *testing.T) {
 		t.Fatalf("expected nil when one node holds all cpus but 2 distinct nodes needed, got %+v", got)
 	}
 }
+
+func TestQueueNodeOKHostList(t *testing.T) {
+	q := &QueueInfo{HostList: []string{"worker1", "@gpu"}}
+	nodeA := &NodeInfo{Name: "worker1", Groups: nil}
+	nodeG := &NodeInfo{Name: "any", Groups: []string{"gpu"}}
+	nodeX := &NodeInfo{Name: "other", Groups: []string{"cpu"}}
+	if !queueNodeOK(q, nodeA) || !queueNodeOK(q, nodeG) {
+		t.Fatalf("hostlist worker1/@gpu should allow worker1 and gpu-group node")
+	}
+	if queueNodeOK(q, nodeX) {
+		t.Fatalf("hostlist should reject node outside list/groups")
+	}
+	// nil queue allows everything.
+	if !queueNodeOK(nil, nodeX) {
+		t.Fatalf("nil queue should allow any node")
+	}
+}
+
+func TestQueueNodeOKExclusive(t *testing.T) {
+	q := &QueueInfo{NaccessPolicy: "exclusive"}
+	idle := &NodeInfo{Name: "n1", Jobs: nil}
+	busy := &NodeInfo{Name: "n2", Jobs: []string{"j1"}}
+	if !queueNodeOK(q, idle) {
+		t.Fatalf("exclusive should allow an idle node")
+	}
+	if queueNodeOK(q, busy) {
+		t.Fatalf("exclusive should reject a node already running a job")
+	}
+	// shared (default) allows both.
+	q2 := &QueueInfo{NaccessPolicy: "shared"}
+	if !queueNodeOK(q2, idle) || !queueNodeOK(q2, busy) {
+		t.Fatalf("shared should allow both idle and busy nodes")
+	}
+}

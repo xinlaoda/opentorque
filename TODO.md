@@ -72,32 +72,26 @@ Real multi-node allocation is implemented in both scheduling paths.
   first chunk; true mother/superior task fan-out via `pbsdsh` remains a
   follow-up (each node runs the full script - sleep/independent jobs work).
 
-### 1.5 Queue node-affinity (queue `naccesspolicy`)  [GAP]
-No equivalent of PBS `naccesspolicy` (shared / sharing-exclusive / exclhost) or
-queue-to-node-pool binding. A route/execution queue has no node-selection policy.
+### 1.5 Queue node-affinity (queue `naccesspolicy`)  [DONE - implemented & tested]
+A queue can now set `naccesspolicy`: `shared` (default) packs multiple jobs
+per node, while `exclusive` / `singleuser` allow only one job per node (a
+node that already runs a job is not a candidate). Parsed, displayed, and
+persisted on the queue, and enforced by both schedulers (`queueNodeOK` in
+`internal/sched/scheduler` and `internal/server`).
+- Test: `TestQueueNodeOKExclusive` (external scheduler).
 
-### 1.6 Queue node-pool (`hostlist`) vs. submission-host ACL (`acl_hosts`)  [GAP]
-Two TORQUE attributes are easily confused; both are unimplemented/mis-wired in
-OpenTorque. Their semantics (per `docs/job_queue_analysis.md` §6.2, §11.3) and
-status:
-- **`hostlist`** (queue attribute) — binds the queue to a set of **compute
-  nodes** (a node pool). Jobs in the queue may only run on those nodes.
-  Supports wildcards, e.g. `set queue gpu hostlist=gpu01,gpu02` or
-  `hostlist=node[001-100]`. This is the core mechanism for queue→node-pool
-  isolation. **OpenTorque: not implemented at all** — no queue field/logic; the
-  scheduler iterates all nodes regardless of queue (see 1.3/1.5, and scheduler
-  `findNodeForJob`).
-- **`acl_hosts`** (with `acl_host_enable`) — restricts which **submission
-  (client/login) hosts** may submit jobs *into* the queue. Its values are
-  client hostnames/IPs (e.g. `submit.cluster.local`), **NOT compute nodes**. It
-  is a submit-side access control, parallel to `acl_users`/`acl_groups`.
-- Key difference: `hostlist` controls **where jobs run** (compute nodes);
-  `acl_hosts` controls **who/where may submit** (clients).
-- **OpenTorque status**: `acl_hosts` exists only at server config level
-  (`s.cfg.ACLHosts`, "allowed submission hosts") and is **never enforced**; the
-  queue-level `ACLHosts` field is never read (see 3.5). Implement both as
-  specified so the two roles are not conflated.
-
+### 1.6 Queue node-pool (`hostlist`) vs. submission-host ACL (`acl_hosts`)  [DONE — implemented & tested]
+Both roles are now wired and kept distinct:
+- **`hostlist`** (queue attr) restricts which compute nodes a queue may schedule
+  onto; values are node names or `@`-prefixed host groups (1.3). Enforced at
+  node selection in both schedulers (`queueNodeOK` in `internal/sched/scheduler`
+  and `internal/server`).
+- **`acl_hosts`** (with `acl_host_enable`) restricts which submission/client
+  hosts may submit *into* the queue. Enforced at submit in
+  `Server.queueAllowsSubmitHost` using `PBS_O_HOST` or the host portion of
+  `Job_Owner`.
+- Tests: `TestQueueNodeOKHostList` (scheduler), `TestQueueAllowsSubmitHost`
+  (server).
 ------
 
 ## 2. Scheduler & resource management
