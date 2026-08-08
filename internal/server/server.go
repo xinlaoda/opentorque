@@ -4947,47 +4947,17 @@ func (s *Server) recoverJobs() {
 			continue
 		}
 		jobID := strings.TrimSuffix(e.Name(), ".JB")
-		j := job.NewJob(jobID, "", s.cfg.ServerName)
+		j := deserializeJob(string(data), jobID, s.cfg.ServerName)
 
-		// Parse simple key=value format
-		for _, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if idx := strings.Index(line, "="); idx > 0 {
-				key := line[:idx]
-				val := line[idx+1:]
-				switch key {
-				case "state":
-					fmt.Sscanf(val, "%d", &j.State)
-				case "substate":
-					fmt.Sscanf(val, "%d", &j.Substate)
-				case "queue":
-					j.Queue = val
-				case "owner":
-					j.Owner = val
-				case "name":
-					j.Name = val
-				case "euser":
-					j.EUser = val
-				case "egroup":
-					j.EGroup = val
-				case "exec_host":
-					j.ExecHost = val
-				case "stdout":
-					j.StdoutPath = val
-				case "stderr":
-					j.StderrPath = val
-				case "exit_status":
-					fmt.Sscanf(val, "%d", &j.ExitStatus)
-				case "provision_vm":
-					j.ProvisionVM = val
-				case "provision_node":
-					j.ProvisionNode = val
-				}
-			}
-		}
-
-		// Skip completed jobs if they're old
+		// Completed jobs are reloaded so finished-job read-back survives a
+		// restart; completedJobCleanup purges them after keep_completed later.
+		// (TODO 5.2)
 		if j.State == job.StateComplete {
+			s.jobMgr.AddJob(j)
+			if q := s.queueMgr.GetQueue(j.Queue); q != nil {
+				q.IncrJobCount(j.State)
+			}
+			log.Printf("[SERVER] Recovered completed job %s (queue=%s)", j.ID, j.Queue)
 			continue
 		}
 
@@ -5348,10 +5318,10 @@ func (s *Server) saveNodes() {
 }
 
 // saveJob writes a job's state to disk.
-func (s *Server) saveJob(j *job.Job) {
-	j.Mu.RLock()
-	defer j.Mu.RUnlock()
-
+// serializeJob renders a Job to the key=value .JB persistence format. It keeps
+// the full attributes needed for completed-job read-back (TODO 5.2): the
+// resource request, execution/timing fields, and multi-node layout.
+func serializeJob(j *job.Job) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("state=%d\n", j.State))
 	sb.WriteString(fmt.Sprintf("substate=%d\n", j.Substate))
@@ -5363,17 +5333,114 @@ func (s *Server) saveJob(j *job.Job) {
 	sb.WriteString(fmt.Sprintf("exec_host=%s\n", j.ExecHost))
 	sb.WriteString(fmt.Sprintf("stdout=%s\n", j.StdoutPath))
 	sb.WriteString(fmt.Sprintf("stderr=%s\n", j.StderrPath))
+	sb.WriteString(fmt.Sprintf("exec_port=%d\n", j.ExecPort))
+	sb.WriteString(fmt.Sprintf("session=%d\n", j.SessionID))
 	sb.WriteString(fmt.Sprintf("exit_status=%d\n", j.ExitStatus))
+	sb.WriteString(fmt.Sprintf("priority=%d\n", j.Priority))
+	sb.WriteString(fmt.Sprintf("node_count=%d\n", j.NodeCount))
+	sb.WriteString(fmt.Sprintf("task_count=%d\n", j.TaskCount))
+	if !j.CompTime.IsZero() {
+		sb.WriteString(fmt.Sprintf("comp_time=%d\n", j.CompTime.Unix()))
+	}
+	if !j.StartTime.IsZero() {
+		sb.WriteString(fmt.Sprintf("start_time=%d\n", j.StartTime.Unix()))
+	}
+	if !j.QueueTime.IsZero() {
+		sb.WriteString(fmt.Sprintf("qtime=%d\n", j.QueueTime.Unix()))
+	}
+	if !j.CreateTime.IsZero() {
+		sb.WriteString(fmt.Sprintf("create_time=%d\n", j.CreateTime.Unix()))
+	}
+	keys := make([]string, 0, len(j.ResourceReq))
+	for k := range j.ResourceReq {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		sb.WriteString(fmt.Sprintf("req.%s=%s\n", k, j.ResourceReq[k]))
+	}
 	if j.ProvisionVM != "" {
 		sb.WriteString(fmt.Sprintf("provision_vm=%s\n", j.ProvisionVM))
 	}
 	if j.ProvisionNode != "" {
 		sb.WriteString(fmt.Sprintf("provision_node=%s\n", j.ProvisionNode))
 	}
+	return sb.String()
+}
+
+// deserializeJob parses a .JB key=value file back into a Job, restoring the
+// full attribute set (resource request, timing, execution, multi-node layout)
+// so completed jobs can be re-queried after a restart (TODO 5.2).
+func deserializeJob(data, jobID, serverName string) *job.Job {
+	j := job.NewJob(jobID, "", serverName)
+	setTime := func(dst *time.Time, val string) {
+		if ts, err := strconv.ParseInt(val, 10, 64); err == nil {
+			*dst = time.Unix(ts, 0)
+		}
+	}
+	for _, line := range strings.Split(data, "\n") {
+		line = strings.TrimSpace(line)
+		if idx := strings.Index(line, "="); idx > 0 {
+			key := line[:idx]
+			val := line[idx+1:]
+			switch key {
+			case "state":
+				fmt.Sscanf(val, "%d", &j.State)
+			case "substate":
+				fmt.Sscanf(val, "%d", &j.Substate)
+			case "queue":
+				j.Queue = val
+			case "owner":
+				j.Owner = val
+			case "name":
+				j.Name = val
+			case "euser":
+				j.EUser = val
+			case "egroup":
+				j.EGroup = val
+			case "exec_host":
+				j.ExecHost = val
+			case "exec_port":
+				fmt.Sscanf(val, "%d", &j.ExecPort)
+			case "session":
+				fmt.Sscanf(val, "%d", &j.SessionID)
+			case "exit_status":
+				fmt.Sscanf(val, "%d", &j.ExitStatus)
+			case "priority":
+				fmt.Sscanf(val, "%d", &j.Priority)
+			case "node_count":
+				fmt.Sscanf(val, "%d", &j.NodeCount)
+			case "task_count":
+				fmt.Sscanf(val, "%d", &j.TaskCount)
+			case "comp_time":
+				setTime(&j.CompTime, val)
+			case "start_time":
+				setTime(&j.StartTime, val)
+			case "qtime":
+				setTime(&j.QueueTime, val)
+			case "create_time":
+				setTime(&j.CreateTime, val)
+			case "provision_vm":
+				j.ProvisionVM = val
+			case "provision_node":
+				j.ProvisionNode = val
+			default:
+				if strings.HasPrefix(key, "req.") {
+					j.ResourceReq[strings.TrimPrefix(key, "req.")] = val
+				}
+			}
+		}
+	}
+	return j
+}
+func (s *Server) saveJob(j *job.Job) {
+	j.Mu.RLock()
+	payload := serializeJob(j)
+	j.Mu.RUnlock()
 
 	path := filepath.Join(s.cfg.JobsDir, j.ID+".JB")
 	tmpFile := path + ".new"
-	if err := os.WriteFile(tmpFile, []byte(sb.String()), 0640); err == nil {
+	if err := os.WriteFile(tmpFile, []byte(payload), 0640); err == nil {
 		os.Rename(tmpFile, path)
 	}
 }

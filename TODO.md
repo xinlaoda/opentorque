@@ -729,9 +729,21 @@ total/free cores into the server status, surfaced by `qstat -B -f`:
 Single `pbs_server`; no active/passive failover, no job migration, no server
 redundancy used in production.
 
-### 5.2 Completed-job status read-back  [GAP/BUG]
-Beyond the `qstat -f` 15001 bug (2.4), there is no retention/query path that
-reliably returns full attributes of finished jobs.
+### 5.2 Completed-job status read-back  [DONE - implemented & tested]
+Finished jobs now keep their full attribute set and remain queryable through the
+retention window, including across a server restart.
+- `saveJob`/`recoverJobs` were refactored around `serializeJob` /
+  `deserializeJob`: the `.JB` file now persists the resource request
+  (`req.<resc>=<val>`), timing (`qtime`/`start_time`/`comp_time`),
+  execution + exit status, and the multi-node layout (`node_count` /
+  `task_count`, `+`-joined `exec_host`).
+- `recoverJobs` previously *skipped* completed jobs, so finished-job history
+  was lost on restart and their `.JB` files leaked on disk. Completed jobs are
+  now reloaded into the job manager and stay queryable via `qstat` until
+  `completedJobCleanup` purges them after `keep_completed` (removing the
+  leak too).
+- Unit test: `TestSerializeDeserializeJobCompleted` (round-trips resource
+  request, timing, exec/exit, multi-node layout).
 
 ### 5.3 No Go unit tests  [DONE - added]
 `go test ./...` finds no test files; correctness is validated only by manual
