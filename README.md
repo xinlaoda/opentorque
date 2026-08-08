@@ -22,6 +22,7 @@ OpenTorque is a clean-room reimplementation of the [TORQUE Resource Manager](htt
 - **Multiple scheduling algorithms**: FIFO, shortest/longest job first, priority-based, fair-share, round-robin, starvation prevention
 - **Token-based authentication**: HMAC-SHA256, no separate auth daemon needed
 - **Cross-platform**: compiles natively for Linux (amd64/arm64), macOS, and Windows
+- **Cloud bursting**: elastic cloud pool — local nodes first, burst to cloud VMs only when local capacity is exhausted, auto scale-in
 - **Wire-compatible**: uses the same DIS protocol as TORQUE for interoperability
 
 ## Architecture
@@ -102,6 +103,23 @@ qmgr -c "set queue batch enabled = True"
 qmgr -c "set server default_queue = batch"
 ```
 
+
+### Run as systemd Services
+
+For resilient, boot-persistent deployments the daemons can run under systemd.
+Ready-made units are provided in `configs/systemd/` (`pbs_server.service`,
+`pbs_sched.service`, `pbs_mom.service`). Install and enable them on the relevant
+hosts:
+
+```bash
+sudo cp configs/systemd/*.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now pbs_server pbs_sched pbs_mom
+```
+
+The scheduler unit already injects the Azure managed-identity `AZURE_CLIENT_ID`
+needed by the cloud bursting controller.
+
 ### Submit a Job
 
 ```bash
@@ -142,6 +160,21 @@ load_balancing: false   ALL
 
 See [docs/scheduling_algorithms.md](docs/scheduling_algorithms.md) for the full algorithm reference.
 
+## Cloud Bursting (Elastic Cloud Pool)
+
+OpenTorque can overflow a fixed local cluster onto dynamically-provisioned
+cloud VMs when local capacity is exhausted, and scale them back down when idle.
+Cloud bursting is **local-first**: `findNodeForJob` always places jobs on static
+local nodes and only falls back to auto-registered (dynamic) cloud nodes once
+local capacity is gone — so a still-registered idle cloud VM is never dispatched
+ahead of a free local node.
+
+It is configured per queue via `cloud_*` burst attributes and driven by the
+event-driven Cloud Elastic Controller (CEC) + Azure Cloud Resource Provider
+(CRP). See [docs/cloud-bursting.md](docs/cloud-bursting.md) for the full design,
+lifecycle, and configuration reference.
+
+
 ## Project Structure
 
 ```
@@ -180,6 +213,10 @@ opentorque/
 
 - [Installation Guide](docs/INSTALL.md)
 - [Scheduling Algorithms](docs/scheduling_algorithms.md)
+- [Cloud Bursting](docs/cloud-bursting.md)
+- [Cloud Elastic — Event-Driven Design](docs/cloud-elastic-event-driven-design.md)
+- [Cloud Elastic — Node Scaling Design](docs/cloud-elastic-node-scaling-design.md)
+- [Run as systemd services](configs/systemd/)
 - [Data Persistence](docs/data_persistence_analysis.md)
 - [CLI Reference](docs/cli/)
 - [PBS Server Analysis](docs/pbs_server_analysis.md)

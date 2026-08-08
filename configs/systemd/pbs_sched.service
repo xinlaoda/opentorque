@@ -1,10 +1,14 @@
 [Unit]
 Description=OpenTorque PBS Scheduler
+After=network.target
+Requires=pbs_server.service
 After=pbs_server.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/sbin/pbs_sched -D
+# User-assigned managed identity client id used by the Azure CRP (crp/azure.go).
+Environment=AZURE_CLIENT_ID=fa1728f6-9e62-4ffd-95a2-232f888c4814
+ExecStart=/usr/local/sbin/pbs_sched -D -p /var/spool/torque
 Restart=on-failure
 RestartSec=5
 

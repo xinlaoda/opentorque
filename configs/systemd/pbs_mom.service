@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/sbin/pbs_mom -D
+ExecStart=/usr/local/sbin/pbs_mom -D -d /var/spool/torque
 Restart=on-failure
 RestartSec=5
 

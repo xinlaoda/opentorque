@@ -4,6 +4,62 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+
+## [Unreleased]
+
+### Added
+- **Cloud bursting / elastic cloud pool** (M1–M4)
+  - Event-driven Cloud Elastic Controller (CEC) — pure event loop reacting to
+    `capacity` / `nodefree` / `nodeidle` / `nodedown`; never polls to scale out.
+  - Azure Cloud Resource Provider (CRP) driver with MSI identity token auth
+    (`AZURE_CLIENT_ID`), dynamic worker-VM auto-registration, and `PROVISIONING`
+    state with VM↔job binding during boot.
+  - Per-queue `cloud_*` burst attributes (`cloud_provider`, `cloud_vm_sku`,
+    `cloud_min_nodes`, `cloud_max_nodes`, `cloud_idle_time`, `cloud_reclaim`
+    (`deallocate`|`hibernate`), `cloud_subnet_id`, `cloud_image_id`,
+    `cloud_disk_size`/`type`, `cloud_ssh_key`, `cloud_location`, `cloud_rg_name`).
+  - Event-driven scale-in with idle reclaim windows, `deallocate`/`hibernate`
+    reclaim, and hibernate fast-resume.
+  - Elasticity tuning: per-pool scale-out `cooldown`, `scale_headroom`,
+    `provision-timeout`, and `drain-timeout`; node **drain/exclusive** rollout
+    primitive (4.1/4.2).
+  - **Local-first dispatch** — `findNodeForJob` prefers static local nodes and
+    only falls back to auto-registered (dynamic/cloud) nodes once local capacity
+    is exhausted; node `is_dynamic` persisted/recovered.
+  - `qstat -B`: per-pool free-cores status snapshot (M4 follow-up).
+  - Job arrays (`qsub -t` expansion to sub-jobs), `qmove` for held/waiting jobs
+    (reject running), queue routing (`queue_type=R`) + admission gate, `momctl`
+    direct MOM attribute query (3.4), queue reconcile + `Priority` +
+    `disallowed_types` gate (3.5), queue limits/resource-interval persistence
+    across restart.
+  - First unit tests (queue routing, local-first dispatch, scheduler).
+- **Deployment hardening** — sample systemd units for `pbs_server`, `pbs_sched`,
+  `pbs_mom` with foreground `-D` mode, ordering/deps, and `AZURE_CLIENT_ID` for
+  the cloud scheduler; daemons migrated from ad-hoc spawned processes to
+  boot-persistent systemd services.
+
+### Fixed
+- `getWorkDir` falls back to an existing workdir / `/` instead of failing when
+  `PBS_O_WORKDIR`/`HOME` is missing — fixes jobs sticking in `Q` with a stale
+  MOM binary (commit reply `15004` / re-dispatch `15014`).
+- Scale-in destroy path now deletes each VM's NICs and public IP after the VM
+  delete completes — no leaked network resources at scale.
+- Orphaned MOM job sessions are reaped on restart/re-dispatch and their `.SID`
+  sidecar removed on cleanup.
+- Auto-requeue running jobs on node-down and a server RWMutex self-deadlock in
+  auto-requeue/`qrerun` (2.10).
+- Node CPU capacity accounted per-job `CPUReq` (2.6); hidden stale nodes no longer
+  skew dispatch.
+- IMDS token `expires_in` string tolerance + required `api-version`; correct
+  per-resource-type API version for NIC vs VM calls.
+
+### Changed
+- Default scheduler mode set to `external`.
+- Queue/node accounting keeps `model`/`configured`/`used` attribute sets
+  consistent (3.5); `qmgr` keeps comma-list queue attributes and shows
+  `resources_min`.
+- New design/governance docs: cloud bursting, event-driven cloud elasticity,
+  node scaling design, and updated AGENTS.md conventions.
 ## [0.2.0] - 2026-02-16
 
 ### Added
