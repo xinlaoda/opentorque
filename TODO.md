@@ -428,7 +428,7 @@ A graceful drain state now exists (see 4.4f). `pbsnodes -D <node>` sets a
 `excl` is also supported. Both schedulers and the node-capacity snapshot
 honor drain/excl.
 
-### 4.3 Cloud elastic node scaling (queue-driven)  [GAP] -- DESIGNED, NOT implemented
+### 4.3 Cloud elastic node scaling (queue-driven)  [DONE — implemented & live-tested]
 Queue-defined burst/scale-in of cloud VMs. When a queue (or node group) carries
 cloud attributes, an external "Cloud Elastic Controller" (CEC) talks to a
 per-cloud "Cloud Resource Provider" (CRP) process to provision/deprovision worker
@@ -464,10 +464,10 @@ VMs on demand. Not implemented; the designs are the authoritative reference:
   `cloud_max_nodes`, cold-start latency for `deallocate` vs `hibernate`,
   and coordination with HA (section 5).
 
-### 4.4 Event-driven elastic controller implementation  [GAP] -- scoped
+### 4.4 Event-driven elastic controller implementation  [DONE — implemented & live-tested]
 Concrete work items to build the event-driven cloud elasticity (per
 `docs/cloud-elastic-event-driven-design.md`, esp. the revision in §13):
-- **M0** — add the `cloud_*` queue attributes end-to-end: model fields
+- **M0** — add the `cloud_*` queue attributes end-to-end: model fields  **[DONE -- implemented & live-tested]** -- the cloud_* burst attributes are parsed, displayed, and persisted across server restart.
   (`internal/queue/queue.go`), `applyQueueAttrs` parsing, `formatQueueStatus`
   display, and persistence (server restart). Enables config only.
 - **M1** — `pbs_sched` emits a JSON `NeedCapacity` event when jobs are left

@@ -28,18 +28,25 @@ OpenTorque is a clean-room reimplementation of the [TORQUE Resource Manager](htt
 ## Architecture
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌─────────────┐
-│  CLI Tools  │────▶│  pbs_server  │────▶│   pbs_mom   │
-│ qsub/qstat  │     │  (job mgmt)  │     │ (execution) │
-│  qdel/qmgr  │     │              │     │             │
-└─────────────┘     │  ┌────────┐  │     └─────────────┘
-                    │  │built-in│  │
-                    │  │  FIFO  │  │
-                    │  └────────┘  │
-┌─────────────┐     │              │
-│  pbs_sched  │────▶│              │
-│ (advanced)  │     └──────────────┘
-└─────────────┘
+┌─────────────┐     ┌──────────────────┐     ┌───────────────────┐
+│  CLI Tools  │────▶│    pbs_server    │────▶│    pbs_mom        │
+│ qsub/qstat  │     │  jobs · queues   │     │  (execution)      │
+│ qdel/qmgr   │     │  · nodes · FIFO  │     │  on LOCAL node    │
+└─────────────┘     └───────┬──────────┘     └───────────────────┘
+                   status ▲ │ dynamic node
+                          │ ▼ auto-registration
+      ┌────────────────────┴──────────────┐
+      │          pbs_sched (external)     │──┐
+      │  advanced algorithms + CEC        │  │ capacity / idle
+      │  (cloud elastic controller)       │◀─┘ events
+      └───────────────┬───────────────────┘
+                      │ provision / scale / reclaim (CRP)
+                      ▼
+         ┌────────────────────────────┐
+         │   cloud worker VMs (Azure) │────▶ auto-register as dynamic
+         │   burst pool (per-queue)   │      nodes; reclaimed when idle
+         └────────────────────────────┘
+               ▲ cloud-bursting path ▲
 ```
 
 ### Components
@@ -162,17 +169,58 @@ See [docs/scheduling_algorithms.md](docs/scheduling_algorithms.md) for the full 
 
 ## Cloud Bursting (Elastic Cloud Pool)
 
-OpenTorque can overflow a fixed local cluster onto dynamically-provisioned
-cloud VMs when local capacity is exhausted, and scale them back down when idle.
-Cloud bursting is **local-first**: `findNodeForJob` always places jobs on static
-local nodes and only falls back to auto-registered (dynamic) cloud nodes once
-local capacity is gone — so a still-registered idle cloud VM is never dispatched
-ahead of a free local node.
+Cloud bursting lets a fixed local cluster **overflow onto cloud VMs only when
+local capacity is exhausted** and automatically scale them back down when they
+sit idle — so you pay for cloud compute on demand instead of over-provisioning
+local hardware, and never leave local nodes idle while a rented VM runs.
 
-It is configured per queue via `cloud_*` burst attributes and driven by the
-event-driven Cloud Elastic Controller (CEC) + Azure Cloud Resource Provider
-(CRP). See [docs/cloud-bursting.md](docs/cloud-bursting.md) for the full design,
-lifecycle, and configuration reference.
+Cloud bursting is **local-first** by design: the scheduler always places jobs on
+static local nodes and only falls back to auto-registered (dynamic) cloud nodes
+once local capacity is gone. A still-registered idle cloud VM is never dispatched
+ahead of a free local node (see `findNodeForJob` in
+`internal/sched/scheduler/scheduler.go`).
+
+It is configured **per queue** with `cloud_*` burst attributes and driven at
+runtime by the event-driven **Cloud Elastic Controller (CEC)** plus an Azure
+**Cloud Resource Provider (CRP)**.
+
+### Minimal configuration
+
+Make the `batch` queue cloud-backed by pointing it at Azure, a subnet, and the
+burst bounds (via `qmgr`):
+
+```text
+# basic local queue
+qmgr -c "create queue batch"
+qmgr -c "set queue batch queue_type = Execution"
+qmgr -c "set queue batch enabled = True"
+qmgr -c "set queue batch started = True"
+
+# cloud burst for this queue (Azure)
+qmgr -c "set queue batch cloud_provider = azure"
+qmgr -c "set queue batch cloud_vm_sku = Standard_D8s_v3"
+qmgr -c "set queue batch cloud_max_nodes = 8"
+qmgr -c "set queue batch cloud_idle_time = 300"
+qmgr -c "set queue batch cloud_reclaim = deallocate"
+qmgr -c "set queue batch cloud_subnet_id = /subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<sb>"
+```
+
+### Submit
+
+Just submit normally — local nodes are used first, and cloud VMs are provisioned
+automatically when needed and reclaimed when idle:
+
+```bash
+# runs on a local node while one is free
+echo "sleep 10" | qsub -l ncpus=2 -N local
+
+# overflows to freshly-provisioned cloud VMs only once local cores are used up
+for i in $(seq 1 16); do echo "sleep 60" | qsub -l ncpus=2; done
+```
+
+Monitor with `qstat` and `pbsnodes` (dynamic cloud nodes show
+`is_dynamic = true`). See [docs/cloud-bursting.md](docs/cloud-bursting.md) for
+the full lifecycle, attribute reference, and tuning knobs.
 
 
 ## Project Structure
