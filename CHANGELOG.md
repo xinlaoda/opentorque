@@ -33,6 +33,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     `disallowed_types` gate (3.5), queue limits/resource-interval persistence
     across restart.
   - First unit tests (queue routing, local-first dispatch, scheduler).
+- **Node selection & queue policy (1.3/1.5/1.6)** — host groups / node pools
+  (`-l host=@group`, node `hostgroups`), queue `naccesspolicy`
+  (`shared`/`exclusive`), queue `hostlist` node-pool binding, and queue-level
+  `acl_hosts` submission-host ACL — enforced by both the built-in and external
+  schedulers, persisted across restart.
+- **Multi-node placement (1.4)** — `-l nodes=N:ppn=M` / `select=` allocate N
+  distinct nodes (each >= ppn free), record a `+`-joined `exec_host`, and
+  dispatch the job to every node; MOM emits `PBS_NODEFILE`/`PBS_NODELIST`.
+- **Completed-job read-back (5.2)** — `.JB` persists full job attributes
+  (resource request, timing, exec/exit, multi-node layout) and completed jobs
+  are reloaded on restart and stay queryable until the `keep_completed` purge.
+- **Backfill (2.2)** — new `backfill` sched-config knob (default on) lets the
+  external scheduler run fitting jobs past a blocked head even in strict FIFO;
+  the built-in scheduler already backfills.
 - **Deployment hardening** — sample systemd units for `pbs_server`, `pbs_sched`,
   `pbs_mom` with foreground `-D` mode, ordering/deps, and `AZURE_CLIENT_ID` for
   the cloud scheduler; daemons migrated from ad-hoc spawned processes to

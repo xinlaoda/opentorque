@@ -102,9 +102,17 @@ No GPU (`ngpus`), license, or arbitrary named-resource accounting/constraints.
 Resource requests beyond these are effectively ignored (and, with multiple `-l`
 flags, dropped — see 2.3).
 
-### 2.2 Backfill / reservation / preemption  [GAP]
-No backfill, no job reservations, no preemption. These are core to throughput
-on heterogeneous/multi-queue clusters.
+### 2.2 Backfill / reservation / preemption  [DONE — backfill implemented & tested; reservations/preemption open]
+**Backfill is implemented** in both schedulers. A blocked head-of-line job no
+longer holds back later jobs that fit the current free capacity:
+- External `pbs_sched`: new `backfill` sched-config knob (default on). With
+  backfill on, even `strict_fifo` continues to later fittable jobs instead of
+  stopping at the first unrunnable job (`Scheduler.strictStop`); with backfill
+  off, strict FIFO halts as before. Test `TestStrictStop`.
+- Built-in scheduler: `runScheduler` already iterates all queued jobs and
+  dispatches any that fit, so it backfills naturally (FIFO order).
+- **Still open (large follow-ups):** advance job reservations with a future
+  start time, and preemption (suspend/requeue lower-priority running jobs).
 
 ### 2.3 [BUG] `qsub` multiple `-l` flags overwrite each other  [DONE — fixed & live-tested]
 `cmd/qsub/main.go` now uses a repeatable flag value (`concatValue`) registered
