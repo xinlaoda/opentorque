@@ -31,6 +31,7 @@ func TestQueueAllowsSubmitHost(t *testing.T) {
 		t.Fatalf("expected allow when acl disabled")
 	}
 }
+
 // TestAdmitToQueueACLHosts verifies the submission-host ACL at the admission
 // gate (route.go admitToQueue, 1.6). The submit host must come from PBS_O_HOST
 // (falling back to the host part of Job_Owner) so allow-listed hosts pass even

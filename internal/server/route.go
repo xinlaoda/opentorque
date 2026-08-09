@@ -250,7 +250,6 @@ func (s *Server) finalizeRoute(rj *job.Job, owner string) error {
 	return admitToQueue(s.jobMgr, q, rj, owner, false)
 }
 
-
 // jobTypes returns the PBS job-type tags a job carries. Every job is "batch";
 // it is additionally "interactive" (-I), "rerunable" (-r y), or "job_array"
 // (-t) as applicable. Used by the queue disallowed_types gate (TODO 3.5).
