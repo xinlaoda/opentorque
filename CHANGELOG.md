@@ -53,6 +53,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   boot-persistent systemd services.
 
 ### Fixed
+- Queue-level `acl_hosts` admission now resolves the submit host from `PBS_O_HOST` (falling back to the `Job_Owner` host); the route admission gate previously used `hostOf(Job_Owner)`, which is empty for direct `qsub` and rejected even allow-listed hosts (1.6).
 - `getWorkDir` falls back to an existing workdir / `/` instead of failing when
   `PBS_O_WORKDIR`/`HOME` is missing — fixes jobs sticking in `Q` with a stale
   MOM binary (commit reply `15004` / re-dispatch `15014`).
