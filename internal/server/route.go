@@ -115,7 +115,11 @@ func admitToQueue(jm *job.Manager, q *queue.Queue, rj *job.Job, user string, fro
 		return fmt.Errorf("queue %s: group %s not in acl_groups", q.Name, rj.EGroup)
 	}
 	if aclHostEn && len(aclHosts) > 0 {
-		host := hostOf(user)
+		// Resolve the submitting client host the same way queueAllowsSubmitHost
+		// does (PBS_O_HOST, falling back to the host part of Job_Owner). Using
+		// bare hostOf(user) breaks the allow-list for direct qsub because the
+		// client sends Job_Owner without a \"@host\" suffix (1.6).
+		host := submitHostOf(rj)
 		if host == "" || !aclContains(strings.Join(aclHosts, ","), host) {
 			return fmt.Errorf("queue %s: host %s not in acl_hosts", q.Name, host)
 		}
