@@ -66,6 +66,7 @@ type Node struct {
 	Groups     []string // named host groups / node pools this node belongs to (1.3)
 	Note       string   // Administrator note
 	Queue      string   // optional pool/queue ownership (per-pool free-cores)
+	GRes        map[string]int64 // generic named-resource capacity (resources_available.<name>, TODO 2.1)
 
 	// Dynamic marks a node that was auto-registered (e.g. a cloud-provisioned
 	// VM) rather than a statically-configured local node. The scheduler uses

@@ -315,3 +315,51 @@ func TestStrictStop(t *testing.T) {
 		t.Fatalf("default backfill should be true")
 	}
 }
+// TestFindNodeForJobGenericResource verifies generic named-resource constraints
+// (TODO 2.1): a job requiring a resource must land on a node with enough free
+// capacity, and a job that cannot be satisfied anywhere stays blocked.
+func TestFindNodeForJobGenericResource(t *testing.T) {
+	s := newTestScheduler()
+	sinfo := &ServerInfo{Nodes: []*NodeInfo{
+		{Name: "gpuA", State: "free", FreeCPUs: 4, GResTotal: map[string]int64{"gpu": 4}},
+		{Name: "cpuB", State: "free", FreeCPUs: 8},
+	}}
+	// gpu request fits on gpuA (cpuB has no gpu).
+	j := &JobInfo{ID: "1", CPUReq: 1, GRes: map[string]int64{"gpu": 2}}
+	if got := s.findNodeForJob(sinfo, j); got == nil || got.Name != "gpuA" {
+		t.Fatalf("expected gpuA for gpu=2, got %+v", got)
+	}
+	// Capacity partially consumed: gpuA has 3 of 4 used -> free 1 < 2 -> blocked.
+	sinfo.Nodes[0].GResUsed = map[string]int64{"gpu": 3}
+	if got := s.findNodeForJob(sinfo, j); got != nil {
+		t.Fatalf("expected nil when gpu capacity exhausted, got %+v", got)
+	}
+	// Unknown generic resource nowhere available -> blocked.
+	j.GRes = map[string]int64{"license": 1}
+	sinfo.Nodes[0].GResUsed = nil
+	if got := s.findNodeForJob(sinfo, j); got != nil {
+		t.Fatalf("expected nil for unavailable generic resource, got %+v", got)
+	}
+	// No generic request -> plain cpu placement unaffected.
+	j.GRes = nil
+	if got := s.findNodeForJob(sinfo, j); got == nil {
+		t.Fatalf("expected a node when no generic resources requested")
+	}
+}
+
+// TestNodeHasGRes verifies the free-capacity arithmetic used by gres constraints.
+func TestNodeHasGRes(t *testing.T) {
+	n := &NodeInfo{GResTotal: map[string]int64{"gpu": 4}, GResUsed: map[string]int64{"gpu": 1}}
+	if !nodeHasGRes(n, map[string]int64{"gpu": 3}) {
+		t.Fatalf("expected 3 of 4 to fit")
+	}
+	if nodeHasGRes(n, map[string]int64{"gpu": 4}) {
+		t.Fatalf("expected 4 of 4 to NOT fit (only 3 free)")
+	}
+	if nodeHasGRes(n, map[string]int64{"gpu": 1, "mem": 1}) {
+		t.Fatalf("expected request for unavailable resource to fail")
+	}
+	if !nodeHasGRes(n, nil) {
+		t.Fatalf("expected no-request to pass")
+	}
+}

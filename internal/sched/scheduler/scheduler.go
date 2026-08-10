@@ -33,6 +33,7 @@ type JobInfo struct {
 	Features  []string // -l feature=<list> required node properties
 	Nodes     int      // requested node count from -l nodes=/select= (1 for single) (1.4)
 	PPN       int      // requested processors per node (1.4, default 1)
+	GRes      map[string]int64 // generic named-resource requests (Resource_List.<name>, TODO 2.1)
 
 	// Scheduling state
 	CanNotRun     bool
@@ -54,6 +55,8 @@ type NodeInfo struct {
 	Properties []string // node properties/features used for feature matching
 	Groups     []string // named host groups / node pools this node belongs to (1.3)
 	Dynamic    bool     // auto-registered cloud/dynamic node (prefer local statics)
+	GResTotal  map[string]int64 // generic resource capacity (resources_available.<name>)
+	GResUsed   map[string]int64 // generic resource used (gres_used.<name>)
 }
 
 // QueueInfo holds scheduling-relevant attributes for a queue.
@@ -301,6 +304,10 @@ func (s *Scheduler) runCycle(conn *client.Conn, limited bool) (*CycleResult, err
 		node.FreeCPUs -= jinfo.CPUReq
 		if jinfo.CPUReq == 0 {
 			node.FreeCPUs--
+		}
+		for name, req := range jinfo.GRes {
+			if node.GResUsed == nil { node.GResUsed = map[string]int64{} }
+			node.GResUsed[name] += req
 		}
 		node.Jobs = append(node.Jobs, jinfo.ID)
 		dispatched++
@@ -686,7 +693,7 @@ func (s *Scheduler) countSchedulableForJob(sinfo *ServerInfo, jinfo *JobInfo, re
 		if q := queueForJob(sinfo, jinfo.Queue); !queueNodeOK(q, node) {
 			continue
 		}
-		if node.FreeCPUs >= reqCPUs {
+		if node.FreeCPUs >= reqCPUs && nodeHasGRes(node, jinfo.GRes) {
 			n++
 		}
 	}
@@ -751,6 +758,10 @@ func (s *Scheduler) findNodeForJob(sinfo *ServerInfo, jinfo *JobInfo) *NodeInfo 
 		}
 		// Queue policy (1.5/1.6): hostlist node-pool binding + naccesspolicy.
 		if q := queueForJob(sinfo, jinfo.Queue); !queueNodeOK(q, n) {
+			continue
+		}
+		// Generic resource constraints (2.1): node must have free capacity.
+		if !nodeHasGRes(n, jinfo.GRes) {
 			continue
 		}
 		if n.FreeCPUs >= cpuReq {
@@ -837,6 +848,18 @@ func nodeHasGroup(n *NodeInfo, g string) bool {
 	return false
 }
 
+// nodeHasGRes reports whether node n can satisfy all generic named-resource
+// requests in want (available capacity >= requested), TODO 2.1.
+func nodeHasGRes(n *NodeInfo, want map[string]int64) bool {
+	for name, req := range want {
+		free := n.GResTotal[name] - n.GResUsed[name]
+		if free < req {
+			return false
+		}
+	}
+	return true
+}
+
 // nodeHasAllFeatures reports whether node n carries every property in want.
 func nodeHasAllFeatures(n *NodeInfo, want []string) bool {
 	for _, f := range want {
@@ -911,6 +934,17 @@ func parseJobInfo(obj client.StatusObject) *JobInfo {
 					j.Features = append(j.Features, f)
 				}
 			}
+		default:
+			// Generic named resource request (TODO 2.1): any other Resource_List.<name>
+			// is treated as an integer generic-resource count (e.g. ngpus).
+			if strings.HasPrefix(key, "Resource_List.") {
+				if n, err := strconv.Atoi(a.Value); err == nil && n > 0 {
+					if j.GRes == nil {
+						j.GRes = map[string]int64{}
+					}
+					j.GRes[strings.TrimPrefix(key, "Resource_List.")] = int64(n)
+				}
+			}
 		}
 	}
 	return j
@@ -970,6 +1004,19 @@ func parseNodeInfo(obj client.StatusObject) *NodeInfo {
 			}
 		case "is_dynamic":
 			n.Dynamic = (a.Value == "true")
+		default:
+			// Generic named resources (TODO 2.1): capacity + used surfaced by the server.
+			if strings.HasPrefix(a.Name, "resources_available.") {
+				if v, err := strconv.ParseInt(a.Value, 10, 64); err == nil && v >= 0 {
+					if n.GResTotal == nil { n.GResTotal = map[string]int64{} }
+					n.GResTotal[strings.TrimPrefix(a.Name, "resources_available.")] = v
+				}
+			} else if strings.HasPrefix(a.Name, "gres_used.") {
+				if v, err := strconv.ParseInt(a.Value, 10, 64); err == nil && v >= 0 {
+					if n.GResUsed == nil { n.GResUsed = map[string]int64{} }
+					n.GResUsed[strings.TrimPrefix(a.Name, "gres_used.")] = v
+				}
+			}
 		}
 	}
 	// If the server reported used_cpus (authoritative per-job CPUReq sum), use it

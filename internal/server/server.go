@@ -2543,6 +2543,23 @@ func (s *Server) formatNodeStatus(n *node.Node) dis.StatusObject {
 		add("used_cpus", strconv.Itoa(used))
 	}
 
+	// Generic named resources (TODO 2.1): report admin capacity + current usage so
+	// the scheduler can enforce per-resource constraints (free = cap - used).
+	for name, cnt := range n.GRes {
+		add("resources_available."+name, strconv.FormatInt(cnt, 10))
+	}
+	gresUsed := map[string]int64{}
+	for _, jid := range n.AssignedJobs {
+		if j := s.jobMgr.GetJob(jid); j != nil {
+			for name, req := range jobGenericReqs(j) {
+				gresUsed[name] += req
+			}
+		}
+	}
+	for name, u := range gresUsed {
+		add("gres_used."+name, strconv.FormatInt(u, 10))
+	}
+
 	if len(n.Properties) > 0 {
 		add("properties", strings.Join(n.Properties, ","))
 	}
@@ -2578,6 +2595,42 @@ func jobRequestedCPUs(j *job.Job) int {
 		}
 	}
 	return 1
+}
+
+// jobGenericReqs returns the generic named-resource requests of a job (any
+// Resource_List entry that is not one of the scheduler's built-in resources), as
+// name -> integer count (TODO 2.1).
+func jobGenericReqs(j *job.Job) map[string]int64 {
+	req := map[string]int64{}
+	j.Mu.RLock()
+	defer j.Mu.RUnlock()
+	for name, v := range j.ResourceReq {
+		switch name {
+		case "ncpus", "mem", "walltime", "nodes", "select", "ppn", "host", "feature", "features", "properties":
+			continue
+		}
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			req[name] = n
+		}
+	}
+	return req
+}
+// nodeHasGRes reports whether a node can host a job given the job generic
+// named-resource requests (available capacity on the node >= requested), TODO 2.1.
+func (s *Server) nodeHasGRes(n *node.Node, j *job.Job) bool {
+	for name, req := range jobGenericReqs(j) {
+		total := n.GRes[name]
+		var used int64
+		for _, jid := range n.AssignedJobs {
+			if jj := s.jobMgr.GetJob(jid); jj != nil {
+				used += jobGenericReqs(jj)[name]
+			}
+		}
+		if total-used < req {
+			return false
+		}
+	}
+	return true
 }
 
 // formatServerStatus builds a StatusObject for the server itself.
@@ -3262,6 +3315,15 @@ func (s *Server) applyNodeAttrs(n *node.Node, attrs []dis.SvrAttrl) {
 			n.Note = a.Value
 		case "queue":
 			n.Queue = a.Value
+		case "resources_available":
+			if a.Resc != "" {
+				if v, err := strconv.ParseInt(a.Value, 10, 64); err == nil && v >= 0 {
+					if n.GRes == nil {
+						n.GRes = map[string]int64{}
+					}
+					n.GRes[a.Resc] = v
+				}
+			}
 		default:
 			n.Attrs[a.Name] = a.Value
 		}
@@ -3687,6 +3749,12 @@ func (s *Server) selectNodeForJob(j *job.Job, neededSlots int) (*node.Node, int)
 		if ok && len(feats) > 0 && !nodeHasAllFeatures(n, feats) {
 			ok = false
 		}
+		if ok && !s.nodeHasGRes(n, j) {
+			ok = false
+		}
+		if ok && !s.nodeHasGRes(n, j) {
+			ok = false
+		}
 		dyn := n.Dynamic
 		avail := n.AvailableSlots()
 		n.Mu.RUnlock()
@@ -3793,6 +3861,12 @@ func (s *Server) selectNodesForJob(j *job.Job, nodeCount, ppn int) []*node.Node 
 			ok = false
 		}
 		if ok && len(feats) > 0 && !nodeHasAllFeatures(n, feats) {
+			ok = false
+		}
+		if ok && !s.nodeHasGRes(n, j) {
+			ok = false
+		}
+		if ok && !s.nodeHasGRes(n, j) {
 			ok = false
 		}
 		n.Mu.RUnlock()
@@ -5028,6 +5102,19 @@ func (s *Server) recoverNodes() {
 		if qname != "" {
 			nn.Queue = qname
 		}
+		for _, p := range parts[1:] {
+			if strings.HasPrefix(p, "gres.") {
+				kv := strings.SplitN(p[len("gres."):], "=", 2)
+				if len(kv) == 2 {
+					if v, err := strconv.ParseInt(kv[1], 10, 64); err == nil && v >= 0 {
+						if nn.GRes == nil {
+							nn.GRes = map[string]int64{}
+						}
+						nn.GRes[kv[0]] = v
+					}
+				}
+			}
+		}
 		if len(groups) > 0 {
 			nn.Groups = groups
 		}
@@ -5418,6 +5505,9 @@ func (s *Server) saveNodes() {
 		}
 		if len(n.Groups) > 0 {
 			extra += " groups=" + strings.Join(n.Groups, ",")
+		}
+		for name, cnt := range n.GRes {
+			extra += fmt.Sprintf(" gres.%s=%d", name, cnt)
 		}
 		sb.WriteString(fmt.Sprintf("%s np=%d%s\n", n.Name, n.NumProcs, extra))
 		n.Mu.RUnlock()
