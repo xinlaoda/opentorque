@@ -3752,9 +3752,6 @@ func (s *Server) selectNodeForJob(j *job.Job, neededSlots int) (*node.Node, int)
 		if ok && !s.nodeHasGRes(n, j) {
 			ok = false
 		}
-		if ok && !s.nodeHasGRes(n, j) {
-			ok = false
-		}
 		dyn := n.Dynamic
 		avail := n.AvailableSlots()
 		n.Mu.RUnlock()
@@ -3861,9 +3858,6 @@ func (s *Server) selectNodesForJob(j *job.Job, nodeCount, ppn int) []*node.Node 
 			ok = false
 		}
 		if ok && len(feats) > 0 && !nodeHasAllFeatures(n, feats) {
-			ok = false
-		}
-		if ok && !s.nodeHasGRes(n, j) {
 			ok = false
 		}
 		if ok && !s.nodeHasGRes(n, j) {

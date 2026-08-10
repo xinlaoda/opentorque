@@ -26,13 +26,13 @@ type JobInfo struct {
 	Priority  int
 	QueueTime time.Time
 	Walltime  time.Duration
-	MemReq    int64    // requested memory in KB
-	CPUReq    int      // requested CPUs
-	Host      string   // -l host=<node> pinning (empty = anywhere)
-	HostGroup string   // -l host=@<group> pin to a host group / node pool (1.3)
-	Features  []string // -l feature=<list> required node properties
-	Nodes     int      // requested node count from -l nodes=/select= (1 for single) (1.4)
-	PPN       int      // requested processors per node (1.4, default 1)
+	MemReq    int64            // requested memory in KB
+	CPUReq    int              // requested CPUs
+	Host      string           // -l host=<node> pinning (empty = anywhere)
+	HostGroup string           // -l host=@<group> pin to a host group / node pool (1.3)
+	Features  []string         // -l feature=<list> required node properties
+	Nodes     int              // requested node count from -l nodes=/select= (1 for single) (1.4)
+	PPN       int              // requested processors per node (1.4, default 1)
 	GRes      map[string]int64 // generic named-resource requests (Resource_List.<name>, TODO 2.1)
 
 	// Scheduling state
@@ -51,10 +51,10 @@ type NodeInfo struct {
 	AvailMem   int64 // KB
 	LoadAvg    float64
 	Jobs       []string
-	UsedCPUs   int      // CPUs currently consumed by running jobs (from node used_cpus)
-	Properties []string // node properties/features used for feature matching
-	Groups     []string // named host groups / node pools this node belongs to (1.3)
-	Dynamic    bool     // auto-registered cloud/dynamic node (prefer local statics)
+	UsedCPUs   int              // CPUs currently consumed by running jobs (from node used_cpus)
+	Properties []string         // node properties/features used for feature matching
+	Groups     []string         // named host groups / node pools this node belongs to (1.3)
+	Dynamic    bool             // auto-registered cloud/dynamic node (prefer local statics)
 	GResTotal  map[string]int64 // generic resource capacity (resources_available.<name>)
 	GResUsed   map[string]int64 // generic resource used (gres_used.<name>)
 }
@@ -73,7 +73,7 @@ type QueueInfo struct {
 	// NaccessPolicy: "shared" (default) packs; "exclusive"/"singleuser" allow
 	// one job per node (1.5). HostList restricts schedulable nodes (1.6).
 	NaccessPolicy string
-	HostList       []string
+	HostList      []string
 
 	// Cloud elasticity (cloud-backed queues). When CloudBacked is true the
 	// queue's jobs may be scaled out onto dynamically provisioned VMs.
@@ -306,7 +306,9 @@ func (s *Scheduler) runCycle(conn *client.Conn, limited bool) (*CycleResult, err
 			node.FreeCPUs--
 		}
 		for name, req := range jinfo.GRes {
-			if node.GResUsed == nil { node.GResUsed = map[string]int64{} }
+			if node.GResUsed == nil {
+				node.GResUsed = map[string]int64{}
+			}
 			node.GResUsed[name] += req
 		}
 		node.Jobs = append(node.Jobs, jinfo.ID)
@@ -672,6 +674,7 @@ func (it *jobIterator) nextFlat() *JobInfo {
 func (s *Scheduler) strictStop() bool {
 	return s.cfg.StrictFIFO && !s.cfg.Backfill
 }
+
 // countSchedulableForJob returns how many distinct schedulable nodes satisfy
 // the job's placement constraints (host / host group / feature) with at least
 // reqCPUs free. Used to gate multi-node dispatch (1.4).
@@ -699,6 +702,7 @@ func (s *Scheduler) countSchedulableForJob(sinfo *ServerInfo, jinfo *JobInfo, re
 	}
 	return n
 }
+
 // nodeSchedulable reports whether a node may accept new jobs. Free nodes are
 // schedulable; nodes that are draining, exclusive/offline/down/busy are not;
 // a node already running a job (job-exclusive) may still take more jobs if it
@@ -838,6 +842,7 @@ func queueNodeOK(q *QueueInfo, n *NodeInfo) bool {
 	}
 	return true
 }
+
 // nodeHasGroup reports whether node n belongs to the named host group / pool.
 func nodeHasGroup(n *NodeInfo, g string) bool {
 	for _, grp := range n.Groups {
@@ -1008,12 +1013,16 @@ func parseNodeInfo(obj client.StatusObject) *NodeInfo {
 			// Generic named resources (TODO 2.1): capacity + used surfaced by the server.
 			if strings.HasPrefix(a.Name, "resources_available.") {
 				if v, err := strconv.ParseInt(a.Value, 10, 64); err == nil && v >= 0 {
-					if n.GResTotal == nil { n.GResTotal = map[string]int64{} }
+					if n.GResTotal == nil {
+						n.GResTotal = map[string]int64{}
+					}
 					n.GResTotal[strings.TrimPrefix(a.Name, "resources_available.")] = v
 				}
 			} else if strings.HasPrefix(a.Name, "gres_used.") {
 				if v, err := strconv.ParseInt(a.Value, 10, 64); err == nil && v >= 0 {
-					if n.GResUsed == nil { n.GResUsed = map[string]int64{} }
+					if n.GResUsed == nil {
+						n.GResUsed = map[string]int64{}
+					}
 					n.GResUsed[strings.TrimPrefix(a.Name, "gres_used.")] = v
 				}
 			}
