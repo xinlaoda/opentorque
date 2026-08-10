@@ -65,6 +65,26 @@ The Go implementation uses HMAC-SHA256 token authentication.
 | `resources_max.ncpus` | integer | Maximum CPUs per job |
 | `resources_default.walltime` | time | Default walltime for jobs |
 | `resources_default.nodes` | string | Default node specification |
+| `naccesspolicy` | string | `shared` (pack) or `exclusive`/`singleuser` (one job per node) |
+| `hostlist` | list | Restrict schedulable nodes (node-pool binding) |
+| `acl_host_enable` | boolean | Enable the submission-host ACL gate |
+| `acl_hosts` | list | Allowed submitting client hosts (when `acl_host_enable=True`) |
+| `cloud_provider` | string | Cloud provider for bursting (`azure`) |
+| `cloud_vm_sku` | string | Cloud worker VM size (e.g. `Standard_D8s_v3`) |
+| `cloud_min_nodes` / `cloud_max_nodes` | integer | Burst pool size bounds |
+| `cloud_idle_time` | seconds | Idle reclaim window for dynamic nodes |
+| `cloud_reclaim` | string | Reclaim action: `deallocate` or `hibernate` |
+| `cloud_subnet_id` | string | Azure subnet for burst VMs |
+
+### Node Attributes
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `resources_available.<name>` | integer | Declare generic named-resource capacity (e.g. `gpu`, `license`) |
+| `hostgroups` | list | Host group / node-pool membership (`groups` is accepted synonym) |
+| `properties` | list | Node property tags used by `-l feature=` |
+| `state` | string | Node state: `free`, `offline`, `drain`, `exclusive` |
+| `note` | string | Administrator note |
 
 ### Server Attributes
 

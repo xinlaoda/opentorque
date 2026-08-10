@@ -74,6 +74,10 @@ during execution.
 | `pmem` | size | Per-process memory limit | `pmem=2gb` |
 | `pvmem` | size | Per-process virtual memory | `pvmem=4gb` |
 | `file` | size | Maximum file size | `file=10gb` |
+| `host` | string | Pin to a specific node, or a host group with `@group` | `host=worker1`, `host=@gpu` |
+| `feature` | list | Require node properties (synonyms `features`/`properties`) | `feature=gpu,fast` |
+| `select` | string | Multi-node selection (`N:ppn=M` or `N:ncpus=M`) | `select=2:ppn=4` |
+| `<name>` | int | Any generic resource declared on a node (`resources_available.<name>`) | `gpu=2`, `license=1` |
 
 Size units: `b` (bytes), `kb`, `mb`, `gb`, `tb`.
 
@@ -102,6 +106,46 @@ qsub -l nodes=2:ppn=8,mem=64gb,walltime=24:00:00 job.sh
 # CPU time limit (job killed if CPU time exceeds 4 hours)
 qsub -l cput=04:00:00,walltime=08:00:00 job.sh
 ```
+
+### Node selection, placement & generic resources
+
+The scheduler also understands placement and named-resource keywords beyond
+plain CPU/memory limits:
+
+| Keyword | Purpose | Example |
+|---------|---------|---------|
+| `host=<node>` | Pin the job to one specific node (case-insensitive) | `-l host=worker1` |
+| `host=@<group>` | Schedule within a named host group / node pool (1.3) | `-l host=@gpu` |
+| `feature=a,b` | Only run on nodes that have all listed properties (1.2) | `-l feature=gpu,fast` |
+| `nodes=N:ppn=M` | Allocate N distinct nodes, M processors each (1.4) | `-l nodes=2:ppn=4` |
+| `select=N:ppn=M` | TORQUE `select`/`place` equivalent (1.4) | `-l select=2:ncpus=4` |
+| `<name>=N` | Generic named resource, capacity from `resources_available.<name>` (2.1) | `-l gpu=2`, `-l license=1` |
+
+Examples:
+
+```bash
+# Run on a specific node
+qsub -l host=worker1 job.sh
+
+# Run anywhere inside the "gpu" host group
+qsub -l host=@gpu job.sh
+
+# Only on nodes tagged both "gpu" and "fast"
+qsub -l feature=gpu,fast job.sh
+
+# A 2-node MPI job spanning 2 distinct nodes, pinned to the gpu pool
+qsub -l nodes=2:ppn=4,host=@gpu mpi.sh
+
+# Ask for 1 GPU (or 2 license seats) on a node that has that capacity
+qsub -l gpu=1 train.sh
+qsub -l license=2 sim.sh
+```
+
+- `host=@group`, `feature`, `nodes`/`select`, and generic resources are enforced
+  by both the built-in and external schedulers and compose with each other.
+- Generic resources must be declared first by an admin:
+  `qmgr -c "set node <node> resources_available.<name> = <N>"` — see
+  [Resource Constraints](resource-constraints.md).
 
 ## Additional Attributes (`-W`) Detailed Reference
 

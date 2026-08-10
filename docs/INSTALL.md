@@ -126,6 +126,59 @@ echo "sleep 1" | qsub   # Submit a test job
 qstat                # Should show the job
 ```
 
+## Scheduler Configuration
+
+The scheduler reads `$PBS_HOME/sched_priv/sched_config`. The default is
+**external** mode; set `scheduler_mode` explicitly to choose:
+
+```text
+# external advanced scheduler (default)
+scheduler_mode: external
+backfill: true            # run fittable jobs past a blocked head (default on)
+
+# or the built-in in-process FIFO scheduler
+# scheduler_mode: builtin
+```
+
+If you run `pbs_sched` (external mode) make sure `sched_priv/` exists and is
+writable. See [Scheduling Algorithms](scheduling_algorithms.md) for the full
+algorithm reference.
+
+## Optional Features
+
+OpenTorque ships several TORQUE-style scheduling/resource features on top of
+basic FIFO. A few one-line setups:
+
+```bash
+# host group / node pool
+qmgr -c "set node worker1 hostgroups = gpu"
+
+# generic named resource (e.g. GPU / license capacity)
+qmgr -c "set node worker1 resources_available.gpu = 4"
+qmgr -c "set node worker1 resources_available.license = 2"
+
+# exclusive (one-job-per-node) queue bound to a pool, with a submit-host ACL
+qmgr -c "set queue gpuq naccesspolicy = exclusive"
+qmgr -c "set queue gpuq hostlist = worker1"
+qmgr -c "set queue gpuq acl_host_enable = True"
+qmgr -c "set queue gpuq acl_hosts = 10.0.0.5,10.0.0.6"
+
+# cloud burst on the queue (see Cloud Bursting below)
+qmgr -c "set queue batch cloud_provider = azure"
+qmgr -c "set queue batch cloud_vm_sku = Standard_D8s_v3"
+qmgr -c "set queue batch cloud_max_nodes = 8"
+qmgr -c "set queue batch cloud_idle_time = 300"
+qmgr -c "set queue batch cloud_reclaim = deallocate"
+```
+
+Detailed guides:
+- [Node Selection & Host Groups](node-selection.md)
+- [Multi-Node Placement](multi-node-placement.md)
+- [Queue Policy](queue-policy.md)
+- [Resource Constraints (GPU/license + backfill)](resource-constraints.md)
+- [Job & Data Persistence](job-persistence.md)
+- [Cloud Bursting](cloud-bursting.md)
+
 ## Upgrading from TORQUE
 
 OpenTorque uses the same `$PBS_HOME` directory structure as TORQUE.
@@ -145,8 +198,11 @@ Example unit files are provided in `configs/systemd/`:
 ```bash
 sudo cp configs/systemd/*.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now pbs_server pbs_mom
+sudo systemctl enable --now pbs_server pbs_sched pbs_mom
 ```
+The scheduler unit injects `AZURE_CLIENT_ID` (Azure managed identity) used by
+the cloud-bursting controller. For external mode, keep
+`/var/spool/torque/sched_priv/sched_config` present so `pbs_sched` starts clean.
 
 ## Troubleshooting
 

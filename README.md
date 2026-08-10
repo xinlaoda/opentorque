@@ -319,7 +319,7 @@ opentorque/
 - [Cloud Elastic — Node Scaling Design](docs/cloud-elastic-node-scaling-design.md)
 - [Run as systemd services](configs/systemd/)
 - [Data Persistence](docs/data_persistence_analysis.md)
-- [CLI Reference](docs/cli/)
+- [CLI Reference](docs/cli.md)
 - [PBS Server Analysis](docs/pbs_server_analysis.md)
 - [PBS MOM Analysis](docs/pbs_mom_analysis.md)
 - [PBS Scheduler Analysis](docs/pbs_sched_analysis.md)

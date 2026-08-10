@@ -81,6 +81,12 @@ DevBox
 | `version` | TORQUE MOM version string |
 | `rectime` | Last status update timestamp (Unix epoch) |
 | `jobs` | List of jobs currently running on the node |
+| `resources_available.<name>` | Generic named-resource capacity declared by admin (e.g. `gpu`, `license`) |
+| `gres_used.<name>` | Generic named-resource currently used by running jobs |
+| `hostgroups` | Host group / node-pool membership (1.3) |
+| `properties` | Node property tags used by `-l feature=` (1.2) |
+| `is_dynamic` | `true` for auto-registered cloud (burst) nodes, else static/local |
+| `power_state` | Cloud/VM power state (`Running`, `Stopped`, `deallocated`) |
 
 ## Exit Status
 
