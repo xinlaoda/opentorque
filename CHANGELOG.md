@@ -81,6 +81,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `resources_min`.
 - New design/governance docs: cloud bursting, event-driven cloud elasticity,
   node scaling design, and updated AGENTS.md conventions.
+- New user/admin feature docs: `node-selection.md`, `multi-node-placement.md`,
+  `queue-policy.md`, `resource-constraints.md` (GPU/license + backfill), and
+  `job-persistence.md`; README updated with a scheduling/resource feature overview,
+  quick-start example, and an index of the new guides.
 ## [0.2.0] - 2026-02-16
 
 ### Added

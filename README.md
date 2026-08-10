@@ -23,6 +23,18 @@ OpenTorque is a clean-room reimplementation of the [TORQUE Resource Manager](htt
 - **Token-based authentication**: HMAC-SHA256, no separate auth daemon needed
 - **Cross-platform**: compiles natively for Linux (amd64/arm64), macOS, and Windows
 - **Cloud bursting**: elastic cloud pool — local nodes first, burst to cloud VMs only when local capacity is exhausted, auto scale-in
+- **Node selection**: `-l host=<node>` pinning, `-l feature=a,b` properties, and
+  named host groups / node pools (`-l host=@group`)
+- **Multi-node placement**: `-l nodes=N:ppn=M` / `-l select=` allocates N distinct
+  nodes with `PBS_NODEFILE` / `PBS_NODELIST`
+- **Queue policy**: pack-vs-exclusive `naccesspolicy`, queue `hostlist` node-pool
+  binding, and `acl_hosts` submission-host ACLs
+- **Generic resources**: arbitrary `resources_available.<name>` capacity (GPU /
+  license counts) requested with `-l <name>=N`, with `gres_used` accounting
+- **Backfill**: fittable jobs run in the gap left by a blocked head-of-line job
+  (default on)
+- **Job persistence**: full job attributes persisted; completed jobs remain
+  queryable across server restart
 - **Wire-compatible**: uses the same DIS protocol as TORQUE for interoperability
 
 ## Architecture
@@ -143,6 +155,41 @@ qstat
 pbsnodes -a
 ```
 
+## Scheduling, Placement & Resource Features
+
+Beyond basic FIFO, OpenTorque implements a set of TORQUE-style scheduling and
+resource controls, exposed to users via `qsub -l ...` and to admins via `qmgr`.
+
+| Area | User | Admin | Doc |
+|------|------|-------|-----|
+| Node pinning | `-l host=<node>` | — | `docs/node-selection.md` |
+| Node features | `-l feature=a,b` | `qmgr set node <n> properties=a,b` | `docs/node-selection.md` |
+| Host groups / pools | `-l host=@<grp>` | `qmgr set node <n> hostgroups=grp` | `docs/node-selection.md` |
+| Multi-node | `-l nodes=2:ppn=4` / `-l select=` | — | `docs/multi-node-placement.md` |
+| Pack vs. exclusive | — | `qmgr set queue q naccesspolicy=exclusive` | `docs/queue-policy.md` |
+| Queue node-pool binding | — | `qmgr set queue q hostlist=a,b` | `docs/queue-policy.md` |
+| Submission-host ACL | — | `qmgr set queue q acl_host_enable=True` + `acl_hosts` | `docs/queue-policy.md` |
+| Generic resources (GPU/license) | `-l gpu=2` | `qmgr set node <n> resources_available.gpu=2` | `docs/resource-constraints.md` |
+| Backfill | — | `sched_config`: `backfill: true` | `docs/resource-constraints.md` |
+| Job persistence / read-back | — | server `keep_completed` | `docs/job-persistence.md` |
+
+A short example tying several together:
+
+```bash
+# admin: node with 2 GPUs, in the "gpu" pool, serving an exclusive queue
+qmgr -c "set node worker1 resources_available.gpu = 2"
+qmgr -c "set node worker1 hostgroups = gpu"
+qmgr -c "create queue gpuq"
+qmgr -c "set queue gpuq queue_type = Execution"
+qmgr -c "set queue gpuq started = True"
+qmgr -c "set queue gpuq enabled = True"
+qmgr -c "set queue gpuq naccesspolicy = exclusive"
+qmgr -c "set queue gpuq hostlist = worker1"
+
+# user: 2-node job pinned to the gpu pool, 1 GPU per node
+qsub -q gpuq -l nodes=2:ppn=1 -l gpu=1 -l host=@gpu mpi.sh
+```
+
 ## Scheduler Configuration
 
 OpenTorque supports two scheduling modes configured in `$PBS_HOME/sched_priv/sched_config`:
@@ -156,6 +203,7 @@ Zero-overhead, in-process FIFO scheduling. Best for simple clusters and high-thr
 ### External Advanced Scheduler
 ```
 scheduler_mode: external
+backfill: true            # run fittable jobs past a blocked head (default on)
 scheduler_interval: 10
 by_queue: true          ALL
 sort_by: shortest_job_first ALL
@@ -261,6 +309,11 @@ opentorque/
 
 - [Installation Guide](docs/INSTALL.md)
 - [Scheduling Algorithms](docs/scheduling_algorithms.md)
+- [Node Selection & Host Groups](docs/node-selection.md)
+- [Multi-Node Placement](docs/multi-node-placement.md)
+- [Queue Policy](docs/queue-policy.md)
+- [Resource Constraints (GPU/license + backfill)](docs/resource-constraints.md)
+- [Job & Data Persistence](docs/job-persistence.md)
 - [Cloud Bursting](docs/cloud-bursting.md)
 - [Cloud Elastic — Event-Driven Design](docs/cloud-elastic-event-driven-design.md)
 - [Cloud Elastic — Node Scaling Design](docs/cloud-elastic-node-scaling-design.md)
