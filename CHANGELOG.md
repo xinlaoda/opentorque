@@ -47,6 +47,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Backfill (2.2)** — new `backfill` sched-config knob (default on) lets the
   external scheduler run fitting jobs past a blocked head even in strict FIFO;
   the built-in scheduler already backfills.
+- **Generic named-resource constraints (2.1)** — nodes carry arbitrary
+  `resources_available.<name>` capacity (persisted as `gres.<name>=N`, reloaded on
+  restart) and jobs request them with `qsub -l <name>=N`; both schedulers gate
+  placement on remaining capacity and surface `gres_used.<name>` accounting, with
+  host-group / feature interplay (built-in and external schedulers).
+
 - **Deployment hardening** — sample systemd units for `pbs_server`, `pbs_sched`,
   `pbs_mom` with foreground `-D` mode, ordering/deps, and `AZURE_CLIENT_ID` for
   the cloud scheduler; daemons migrated from ad-hoc spawned processes to

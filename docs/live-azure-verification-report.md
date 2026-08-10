@@ -1,4 +1,4 @@
-# Live Azure Verification Report — TODO 1.3 / 1.4 / 5.2 / 1.5 / 1.6 / 2.2
+# Live Azure Verification Report — TODO 1.3 / 1.4 / 5.2 / 1.5 / 1.6 / 2.2 / 2.1
 
 - **Date:** 2026-08-08 → 08-09 (UTC)
 - **Subscription:** `AB-RenderingTest`
@@ -135,6 +135,36 @@ Same shape; the later fitting job must be held behind the blocked head.
 
 ---
 
+## 2.1 Generic named-resource constraints (GPU / license / arbitrary `-l <name>=N`)
+
+> Context: the westus3 subscription has **no usable GPU VM quota** — every modern GPU
+> SKU family (T4 `NCasT4`, V100 `NCsv3`, A100 `NCads_A100`/`ND*`, H100 `NC*H100`,
+> `NVads`) shows a `0` vCPU limit; only legacy `Standard NC`/`NV` families carry
+> quota. So 2.1 was verified on CPU nodes using generic named-resource (gres)
+> capacity to model GPU/license scarcity, including its host-group interplay.
+
+Node capacity is declared with `qmgr set node <name> resources_available.<name>=N`
+and shown by `pbsnodes`; jobs request them with `qsub -l <name>=N`. Only nodes whose
+remaining capacity (`cap − gres_used`) cover the request are eligible.
+
+| # | Scenario | Command | Result | Verdict |
+|---|----------|---------|--------|---------|
+| A | gres over capacity stays queued | `qsub -q tq -l gpu=100` (w1 cap 2) | Job `290` stayed `Q` | ✅ PASS |
+| B | gres gating places job on capable node | `qsub -q tq -l gpu=1` | Job `288` ran on `xxin-opentorque-w1/0`; `gres_used.gpu=1`; not on srv | ✅ PASS |
+| C | second named resource (license) | `qsub -q tq -l license=2` (srv cap 3) | Job `289` ran on `xxin-opentorque-srv`; `gres_used.license=2` | ✅ PASS |
+| D | gres + host-group interplay | `qsub -q tq -l gpu=1,host=@gpupool` | Job `291` ran on `w1` (only node with gres **and** group) | ✅ PASS |
+| D2 | host-group OK, gres over capacity | `qsub -q tq -l gpu=100,host=@gpupool` | Job `292` stayed `Q` (group matched, gres blocked) | ✅ PASS |
+| E | accounting releases on completion | after jobs finish | `gres_used.gpu`/`.license` returned to 0 | ✅ PASS |
+| F | persistence across restart | `server_priv/nodes` | `gres.gpu=2` / `gres.license=3` written + recovered | ✅ PASS |
+| G | backfill interacts correctly | fittable `gpu=1` behind blocked `gpu=3` | Fittable job ran; blocked head `gpu=3` stayed `Q` | ✅ PASS |
+
+> Notes: an unsatisfiable gres head job stays `Q`; enabling later fittable jobs is
+> the 2.2 `backfill` knob, exactly like a CPU/memory head job. A separate
+> `select=1:ncpus=8` probe on the 2-node/4-core cluster also ran (parsed to <8 CPUs)
+> — noted as an independent follow-up, not a 2.1 regression.
+
+---
+
 ## Summary
 
 | TODO | Feature | Result |
@@ -145,6 +175,7 @@ Same shape; the later fitting job must be held behind the blocked head.
 | 1.5 | Queue `naccesspolicy=exclusive` | ✅ PASS |
 | 1.6 | Queue `hostlist` | ✅ PASS |
 | 1.6 | Queue `acl_hosts` / `acl_host_enable` | ✅ PASS (fixed + re-verified, local & remote allow/reject) |
+| 2.1 | Generic named-resource constraints (gres + host-group interplay) | ✅ PASS |
 | 2.2 | Backfill (`backfill` knob + `strict_fifo`) | ✅ PASS (ON and OFF) |
 
 ### Follow-ups / notes

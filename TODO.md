@@ -96,11 +96,21 @@ Both roles are now wired and kept distinct:
 
 ## 2. Scheduler & resource management
 
-### 2.1 GPU / accelerator, license, and generic resource constraints  [GAP]
-Only `ncpus`, `mem`, `walltime`, and `nodes` are understood by the scheduler.
-No GPU (`ngpus`), license, or arbitrary named-resource accounting/constraints.
-Resource requests beyond these are effectively ignored (and, with multiple `-l`
-flags, dropped — see 2.3).
+### 2.1 GPU / accelerator, license, and generic resource constraints  [DONE — implemented & live-tested]
+Nodes now carry arbitrary named-resource capacities (`resources_available.<name>`
+set via `qmgr set node <name> resources_available.<name>=N`, persisted as
+`gres.<name>=N` and reloaded on restart). Jobs request them with `qsub -l <name>=N`
+(any non-built-in `Resource_List` integer). Both the built-in scheduler
+(`Server.nodeHasGRes` / `selectNodeForJob`) and the external scheduler
+(`Scheduler.nodeHasGRes` / `findNodeForJob`) only place a job on a node whose
+remaining capacity (`cap − used`) covers the request; `pbsnodes` reports
+`resources_available.<name>` and `gres_used.<name>` and the accounting is released
+on job completion. Interoperates with `-l host=@group` host-group pinning and
+CPU/feature gates; a fittable job behind an unsatisfiable gres head job still runs
+under the 2.2 backfill knob.
+
+- Live test (2026-08-10, external scheduler, Azure westus3): see
+  `docs/live-azure-verification-report.md` §2.1.
 
 ### 2.2 Backfill / reservation / preemption  [DONE — backfill implemented & tested; reservations/preemption open]
 **Backfill is implemented** in both schedulers. A blocked head-of-line job no
