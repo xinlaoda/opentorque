@@ -2615,6 +2615,7 @@ func jobGenericReqs(j *job.Job) map[string]int64 {
 	}
 	return req
 }
+
 // nodeHasGRes reports whether a node can host a job given the job generic
 // named-resource requests (available capacity on the node >= requested), TODO 2.1.
 func (s *Server) nodeHasGRes(n *node.Node, j *job.Job) bool {
@@ -2935,6 +2936,7 @@ func (s *Server) queueAllowsSubmitHost(queueName string, j *job.Job) bool {
 	}
 	return false
 }
+
 // enforceSubmitLimits checks ACLs and resource limits before accepting a job.
 func (s *Server) enforceSubmitLimits(j *job.Job, user string) error {
 	s.mu.RLock()
@@ -3711,6 +3713,7 @@ func queueNodeOK(q *queue.Queue, n *node.Node) bool {
 	}
 	return true
 }
+
 // selectNodeForJob picks a schedulable node honoring the job's host pin
 // (-l host=<node>), host group (-l host=@group, 1.3), and feature requirements
 // (-l feature=a,b), with at least neededSlots free CPUs. Local (static) nodes
@@ -3769,13 +3772,16 @@ func (s *Server) selectNodeForJob(j *job.Job, neededSlots int) (*node.Node, int)
 	}
 	return best, neededSlots
 }
+
 // parseNodeSelectSpec parses a TORQUE-style node request into a node count and
 // processors-per-node (ppn). It accepts:
-//   "" or "1"           -> 1 node, 1 ppn
-//   "N"                 -> N nodes, 1 ppn
-//   "N:ppn=M"           -> N nodes, M ppn
-//   "N:ppn=M+R:ppn=S"   -> uses the first chunk (heterogeneous layouts are
-//                          reduced to the first chunk's N x ppn; a follow-up)
+//
+//	"" or "1"           -> 1 node, 1 ppn
+//	"N"                 -> N nodes, 1 ppn
+//	"N:ppn=M"           -> N nodes, M ppn
+//	"N:ppn=M+R:ppn=S"   -> uses the first chunk (heterogeneous layouts are
+//	                       reduced to the first chunk's N x ppn; a follow-up)
+//
 // Returns nodes>=1, ppn>=1.
 func parseNodeSelectSpec(spec string) (nodes, ppn int) {
 	nodes, ppn = 1, 1
@@ -4060,6 +4066,7 @@ func (s *Server) runJobMulti(j *job.Job, firstNode *node.Node, nodeCount, ppn in
 	}
 	return true
 }
+
 // dispatchJobToMOM sends a job (QueueJob + JobScript + Commit) to a MOM daemon.
 // This follows the same protocol sequence that the C pbs_server uses.
 func (s *Server) dispatchJobToMOM(j *job.Job, n *node.Node) {
