@@ -4926,6 +4926,11 @@ func (s *Server) recoverJobs() {
 	}
 	for jobID, data := range fileJobs {
 		j := deserializeJob(string(data), jobID, s.cfg.ServerName)
+		// Restore the job script so a queued/running job can be (re)dispatched
+		// after a restart, and a completed job's script remains queryable.
+		if sc, err := s.store.LoadJobScript(jobID); err == nil {
+			j.Script = string(sc)
+		}
 
 		// Completed jobs are reloaded so finished-job read-back survives a
 		// restart; completedJobCleanup purges them after keep_completed later.

@@ -12,6 +12,7 @@
 package server
 
 import (
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,6 +37,7 @@ type Store interface {
 
 	// jobs: one attributes document (.JB) plus one script document (.SC) per job
 	LoadJobs() (map[string][]byte, error) // id -> attrs bytes
+	LoadJobScript(id string) ([]byte, error)
 	SaveJob(id string, attrs []byte) error
 	SaveJobScript(id string, data []byte) error
 	DeleteJob(id string) error
@@ -52,9 +54,20 @@ type FileStore struct {
 	jobsDir   string
 }
 
-// NewStore returns the configured state Store. Today it always returns a
-// FileStore; a PostgreSQL backend will be selected here once HA lands.
+// NewStore returns the configured state Store. When PBS_PG_DSN is set a
+// PostgreSQL backend is used (single-master with a local DB, or shared for HA);
+// otherwise the default file store is returned. If the PostgreSQL store is
+// configured but cannot connect, it degrades to the file store with a clear
+// warning so the server still starts.
 func NewStore(cfg *config.Config) Store {
+	if dsn := GetPostgresStoreDSN(); dsn != "" {
+		ps, err := NewPostgresStore(dsn)
+		if err == nil {
+			log.Printf("[SERVER] Using PostgreSQL state store")
+			return ps
+		}
+		log.Printf("[SERVER] ERROR: PBS_PG_DSN set but PostgreSQL store unavailable (%v); falling back to file store", err)
+	}
 	return &FileStore{
 		serverDB:  cfg.ServerDB,
 		queuesDir: cfg.QueuesDir,
@@ -134,6 +147,10 @@ func (f *FileStore) SaveJob(id string, attrs []byte) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+func (f *FileStore) LoadJobScript(id string) ([]byte, error) {
+	return os.ReadFile(filepath.Join(f.jobsDir, id+".SC"))
 }
 
 func (f *FileStore) SaveJobScript(id string, data []byte) error {

@@ -16,6 +16,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   its MOM confirms it is no longer running - no double execution, orphans
   requeued. Unit tests in internal/server/reconcile_test.go.
 
+- **PostgreSQL state store (`PostgresStore`, HA).** Added a `PostgresStore`
+  backend behind the `Store` interface (selectable via the `PBS_PG_DSN` env
+  var), storing serverdb / queues / nodes / jobs+scripts as blobs in
+  PostgreSQL. Ships with `pbstool migrate -d <home> -dsn <dsn>` to migrate an
+  existing file store into PG, and a gated unit test (`TestPostgresStoreRoundTrip`,
+  runs with `PBS_PG_TEST_DSN`). Adds the pure-Go `pgx/v5` dependency. Also fixed
+  an underlying gap: job scripts are now restored from the store on recovery,
+  so queued/running jobs can be (re)dispatched after a restart (file or PG).
+  Live-tested on Azure with a local PostgreSQL: migrate, run to completion, and
+  state recovery across restart all work.
+
 - **Persistence abstraction (`ServerStore`, HA groundwork).** Introduced the
   `Store` interface + `FileStore` backend in `internal/server/store.go`; the
   server now persists serverdb / queues / nodes / jobs+scripts through it,

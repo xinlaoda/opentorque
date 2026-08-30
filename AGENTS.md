@@ -6,8 +6,10 @@ are in addition to (not instead of) `CONTRIBUTING.md` and the repo docs.
 ## What this project is
 
 OpenTorque is a clean-room, PBS/TORQUE-compatible batch resource manager and
-scheduler written in Go with **zero external dependencies** (standard library
-only). It speaks the TORQUE DIS wire protocol, so its CLI tools (`qsub`,
+scheduler written in Go with **almost zero external dependencies** (standard
+library only, with one exception: `github.com/jackc/pgx/v5`, the pure-Go
+PostgreSQL driver behind the optional `PostgresStore` state backend for HA).
+It speaks the TORQUE DIS wire protocol, so its CLI tools (`qsub`,
 `qstat`, `qdel`, `pbsnodes`, `qmgr`, ...) and daemons interoperate with the
 real TORQUE ecosystem.
 
