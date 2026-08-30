@@ -21,7 +21,8 @@ requirements. A feature is only "done" if it behaves the way TORQUE would.
   `pbs_track`, `momctl`, `pbsdsh`, ...).
 - `internal/` — shared packages. The important ones:
   - `server/` — `pbs_server` core: job lifecycle, queue/node tracking, request
-    handling, **built-in scheduler** and node status (`server.go`).
+    handling, node status, and the server-side scheduler watch (Waiting-job
+    promotion + external-scheduler health warning) (`server.go`).
   - `sched/scheduler/` — **external** `pbs_sched` advanced scheduler.
   - `cec/` — Cloud Elastic Controller. **Pure event loop**; the sole
     orchestrator of cloud node membership for cloud-backed queues. Never polls
@@ -33,20 +34,25 @@ requirements. A feature is only "done" if it behaves the way TORQUE would.
 - `docs/` — per-tool and design docs. `TODO.md` — the authoritative backlog
   (see below). `configs/` — example sched config + systemd units.
 
-## The two scheduling paths (CRITICAL)
+## The single scheduling path (CRITICAL)
 
-There are **two** schedulers and both must be kept in sync:
+OpenTorque has **one scheduler**: the external `pbs_sched` daemon, implemented
+in `internal/sched/scheduler/scheduler.go`. The old in-process built-in FIFO
+scheduler in `internal/server/server.go` was **removed**.
 
-1. **Built-in**: `internal/server/server.go` (`scheduleJob`, `FindNodeForJob`,
-   `AssignJob`/`ReleaseJob`). In-process FIFO; used when
-   `scheduler_mode: builtin`.
-2. **External**: `internal/sched/scheduler/scheduler.go`. A separate
-   `pbs_sched` process; used when `scheduler_mode: external`.
+- `pbs_server` defaults to external mode (no `scheduler_mode` config needed) and
+  **delegates all job placement to `pbs_sched`**: on job/node events it pings the
+  scheduler on the local trigger port (`SchedTriggerPort`, default 25003), and it
+  logs a clear `WARNING` whenever `pbs_sched` is not reachable.
+- The server keeps a small, mode-independent watchdog (`schedulerWatchLoop` in
+  `internal/server/server.go`) that promotes deferred (Waiting/`-a`) jobs to
+  Queued once their execution time passes — the sibling of `pbs_sched`'s job
+  placement — plus the health warning. Do not reintroduce in-process placement.
 
 When you change job/node capacity accounting, node selection, or dispatch
-logic, apply the **same fix to both paths** and say so explicitly in the commit
-and in `TODO.md`. Live behavior is driven mainly by the external path
-(`pbs_sched`), but the built-in path is also user-facing.
+logic, apply it in `internal/sched/scheduler/scheduler.go` (placement) and, if
+it touches server-side state, in `internal/server/server.go`, and say so
+explicitly in the commit and in `TODO.md`.
 
 ## Workflow & hygiene
 

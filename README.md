@@ -192,17 +192,19 @@ qsub -q gpuq -l nodes=2:ppn=1 -l gpu=1 -l host=@gpu mpi.sh
 
 ## Scheduler Configuration
 
-OpenTorque supports two scheduling modes configured in `$PBS_HOME/sched_priv/sched_config`:
+OpenTorque uses a **single external scheduler**, `pbs_sched` — the in-process
+built-in scheduler was removed. **No configuration is required**: the server
+defaults to external mode and, if a `sched_priv/sched_config` file exists, any
+stale `scheduler_mode: builtin` value is ignored (a warning is logged).
 
-### Built-in FIFO (default)
-```
-scheduler_mode: builtin
-```
-Zero-overhead, in-process FIFO scheduling. Best for simple clusters and high-throughput workloads.
+If `pbs_sched` is **not running**, the server logs a clear periodic warning
+(`WARNING: external scheduler (pbs_sched) is NOT running ... jobs will NOT be
+scheduled until it is started`) so a missing scheduler is never mistaken for a
+quiet cluster.
 
-### External Advanced Scheduler
+The scheduler's advanced-algorithm knobs are configured in
+`$PBS_HOME/sched_priv/sched_config` (only applies to `pbs_sched`):
 ```
-scheduler_mode: external
 backfill: true            # run fittable jobs past a blocked head (default on)
 scheduler_interval: 10
 by_queue: true          ALL

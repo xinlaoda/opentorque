@@ -16,7 +16,7 @@ type Config struct {
 	LogLevel int
 
 	// Scheduling policy flags
-	SchedulerMode     string        // "builtin" or "external"
+	SchedulerMode     string        // "external" (only; builtin removed)
 	StrictFIFO        bool          // Block all jobs behind first unrunnable
 	Backfill          bool          // Run later (fittable) jobs while the head job is blocked (2.2)
 	RoundRobin        bool          // Cycle through queues
@@ -32,7 +32,7 @@ type Config struct {
 	SyncTime          time.Duration // Fair-share usage persistence interval
 	DedicatedPrefix   string        // Queue prefix for dedicated-time jobs
 	SchedulerInterval int           // Seconds between cycles (default 10)
-	// Event-driven / SLURM-style scheduling knobs (parallel to builtin)
+	// Event-driven / SLURM-style scheduling knobs
 	EventDriven       bool // master switch for event notifications/trigger
 	SchedMinInterval  int  // ms between event-triggered (limited) cycles
 	DefaultQueueDepth int  // max jobs attempted per event-triggered limited cycle
@@ -112,7 +112,8 @@ func Load(pbsHome string) *Config {
 
 		switch strings.ToLower(key) {
 		case "scheduler_mode":
-			cfg.SchedulerMode = val
+			// The built-in scheduler was removed; pbs_sched is always external.
+			cfg.SchedulerMode = "external"
 		case "strict_fifo":
 			cfg.StrictFIFO = parseBool(val)
 		case "backfill":

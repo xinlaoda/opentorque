@@ -269,6 +269,25 @@ Implemented in `internal/server/server.go`:
   based on a job's exit code at *completion*, a node that died is not a
   completed job and has no exit code.
 
+### 2.11 Remove the built-in (in-process FIFO) scheduler  [DONE - removed]
+`pbs_server` previously shipped an in-process FIFO scheduler that ran when
+`scheduler_mode: builtin`. It duplicated (and could drift from) the external
+`pbs_sched` placement logic. Removed entirely:
+- `internal/server`: deleted `schedulerLoop`, `runScheduler`, `scheduleJob`,
+  `scheduleJobMulti`, `selectNodeForJob`, `selectNodesForJob`, and the server-
+  side `nodeHasGRes`/`nodeHasAllFeatures`/`queueNodeOK` (their only callers).
+- `pbs_server` now **always** uses the external scheduler (default
+  `SchedulerMode: external`); a stale `scheduler_mode: builtin` in
+  `sched_priv/sched_config` is ignored with a warning.
+- Deferred (`-a`/Waiting) job promotion is now server-side and mode-independent:
+  the new `schedulerWatchLoop` ticker calls `promoteWaitingJobs()` so Waiting
+  jobs reach Queued under the external scheduler too. `qrun` without a node
+  delegates to the external scheduler instead of in-process placement.
+- When `pbs_sched` is not running, the server logs a clear, rate-limited
+  `WARNING` on startup and in the watch loop.
+- Verified: `go vet` + `go test ./internal/...`, and `cmd/pbs_server` /
+  `cmd/pbs_sched` build clean. Live test on Azure below.
+
 ---
 
 ## 3. Queue routing & job control

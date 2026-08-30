@@ -7,6 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **Removed the built-in (in-process FIFO) scheduler.** The external `pbs_sched`
+  is now the only scheduler and the default; `scheduler_mode: builtin` is ignored
+  (server always uses `external`). Deferred (`-a`/Waiting) job promotion is now
+  server-side and mode-independent, so it works under the external scheduler too.
+- **External scheduler health warning.** When `pbs_sched` is not reachable on the
+  trigger port, `pbs_server` logs a periodic `WARNING` so a missing scheduler is
+  not mistaken for a quiet cluster. No scheduler config is required (defaults are
+  external + trigger port 25003).
+
 ### Added
 - **Cloud bursting / elastic cloud pool** (M1–M4)
   - Event-driven Cloud Elastic Controller (CEC) — pure event loop reacting to

@@ -21,7 +21,7 @@ type Config struct {
 	ServerName    string
 	DefaultQueue  string
 	Scheduling    bool
-	SchedulerMode string // "builtin" (default) or "external"
+	SchedulerMode string // "external" (only; the built-in scheduler was removed)
 
 	// Scheduling & timing
 	SchedulerIteration int // seconds between scheduler cycles (default 10)
@@ -35,7 +35,7 @@ type Config struct {
 	JobForceCancelTime int // max seconds before force-cancel stuck jobs (default 0=off)
 	JobSyncTimeout     int // MOM sync timeout at startup (default 120)
 
-	// Event-driven scheduling (SLURM-style) - used by the builtin scheduler
+	// Event-driven scheduling (SLURM-style) - used to wake the external scheduler
 	EventDriven       bool // master switch: enable event notifications + trigger (default on)
 	SchedMinInterval  int  // ms between event-triggered (limited) cycles, anti-storm (default 100)
 	DefaultQueueDepth int  // max jobs attempted per event-triggered limited cycle (default 100)
@@ -43,7 +43,7 @@ type Config struct {
 	MaxSchedTime      int  // sec cap for one scheduling run before yielding (default 2)
 	SchedDefer        bool // batch mode: do not dispatch immediately at submit, let jobs accumulate
 	SchedDeferBatch   bool // defer applies only to batch jobs
-	SchedTriggerPort   int  // external scheduler localhost TCP trigger port (0=disabled)
+	SchedTriggerPort  int  // external scheduler localhost TCP trigger port (0=disabled)
 	// Logging
 	LogLevel            int // event bitmask (default 511)
 	LogFileMaxSize      int // max server log size in bytes (default 0=unlimited)
@@ -98,15 +98,15 @@ type Config struct {
 	AutoNodeNP           bool
 	NPDefault            int
 	// Dynamic node auto-registration (cloud elastic M2)
-	AllowDynamicNodes    bool   // server auto-registers unknown MOMs that contact it
-	NodeAllowedIPRanges  string // comma-separated CIDRs; only nodes from these ranges auto-register
-	JobNanny             bool
-	OwnerPurge           bool
-	CopyOnRerun          bool
-	JobExclusiveOnUse    bool
-	DisableAutoRequeue   bool
-	AutoRequeueExitCode  int // exit code that triggers auto-requeue (default -1=off)
-	DontWriteNodesFile   bool
+	AllowDynamicNodes   bool   // server auto-registers unknown MOMs that contact it
+	NodeAllowedIPRanges string // comma-separated CIDRs; only nodes from these ranges auto-register
+	JobNanny            bool
+	OwnerPurge          bool
+	CopyOnRerun         bool
+	JobExclusiveOnUse   bool
+	DisableAutoRequeue  bool
+	AutoRequeueExitCode int // exit code that triggers auto-requeue (default -1=off)
+	DontWriteNodesFile  bool
 
 	// Job array & display
 	MaxJobArraySize        int // max sub-jobs per array (default 10000)
@@ -158,7 +158,7 @@ func NewConfig(pbsHome string) *Config {
 		LogDir:                 pbsHome + "/server_logs",
 		AcctDir:                pbsHome + "/server_priv/accounting",
 		Scheduling:             true,
-		SchedulerMode:          "builtin",
+		SchedulerMode:          "external",
 		SchedulerIteration:     10,
 		EventDriven:            true,
 		SchedMinInterval:       100,

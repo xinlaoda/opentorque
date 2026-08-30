@@ -58,15 +58,10 @@ type Server struct {
 	// Accounting logger (TORQUE-compatible records in server_priv/accounting/)
 	acctLog *acct.Logger
 
-	// Scheduling
-	schedTicker *time.Ticker
-	nodeTicker  *time.Ticker
-
-	// Event-driven scheduling: buffered signal that a job or node event
-	// occurred (submit, completion, requeue, hold release, node change),
-	// prompting an immediate builtin-scheduler cycle without waiting for
-	// the sched_interval ticker.
-	schedEvent chan struct{}
+	// Scheduling (server-side watch; placement is delegated to pbs_sched)
+	schedTicker   *time.Ticker
+	nodeTicker    *time.Ticker
+	lastSchedWarn time.Time
 
 	// Shutdown
 	done chan struct{}
@@ -98,13 +93,12 @@ func New(cfg *Config) (*Server, error) {
 	icfg.ServerName = hostname
 
 	s := &Server{
-		cfg:        icfg,
-		jobMgr:     job.NewManager(hostname, 0),
-		queueMgr:   queue.NewManager(),
-		nodeMgr:    node.NewManager(),
-		state:      SvStateInit,
-		schedEvent: make(chan struct{}, 1),
-		done:       make(chan struct{}),
+		cfg:      icfg,
+		jobMgr:   job.NewManager(hostname, 0),
+		queueMgr: queue.NewManager(),
+		nodeMgr:  node.NewManager(),
+		state:    SvStateInit,
+		done:     make(chan struct{}),
 	}
 
 	// Initialize accounting logger
@@ -1198,8 +1192,11 @@ func (s *Server) handleRunJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestHead
 
 		go s.dispatchJobToMOM(j, n)
 	} else {
-		// No destination — use built-in placement
-		go s.scheduleJob(j)
+		// No destination given: placement is performed by the external
+		// scheduler. Trigger a pass so pbs_sched dispatches this job
+		// promptly; it remains queued until then.
+		log.Printf("[SERVER] RunJob %s with no destination: delegating to external scheduler", jobID)
+		s.triggerSched()
 	}
 
 	dis.SendOkReply(conn)
@@ -2616,24 +2613,6 @@ func jobGenericReqs(j *job.Job) map[string]int64 {
 	return req
 }
 
-// nodeHasGRes reports whether a node can host a job given the job generic
-// named-resource requests (available capacity on the node >= requested), TODO 2.1.
-func (s *Server) nodeHasGRes(n *node.Node, j *job.Job) bool {
-	for name, req := range jobGenericReqs(j) {
-		total := n.GRes[name]
-		var used int64
-		for _, jid := range n.AssignedJobs {
-			if jj := s.jobMgr.GetJob(jid); jj != nil {
-				used += jobGenericReqs(jj)[name]
-			}
-		}
-		if total-used < req {
-			return false
-		}
-	}
-	return true
-}
-
 // formatServerStatus builds a StatusObject for the server itself.
 func (s *Server) formatServerStatus() dis.StatusObject {
 	s.mu.RLock()
@@ -3339,17 +3318,24 @@ func (s *Server) startBackgroundTasks() {
 	// Read scheduler mode from sched_config if present
 	s.loadSchedConfig()
 
-	// Built-in scheduler: only start when scheduler_mode is "builtin"
+	// The server delegates all job placement to the external pbs_sched daemon;
+	// there is no longer an in-process scheduler. The sched_interval ticker now
+	// only drives the server-side watch (Waiting-job promotion + scheduler
+	// health warning); pbs_sched owns placement and runs its own cycles.
 	schedInterval := time.Duration(s.cfg.SchedulerIteration) * time.Second
 	if schedInterval < 5*time.Second {
 		schedInterval = 5 * time.Second
 	}
 	s.schedTicker = time.NewTicker(schedInterval)
-	if s.cfg.SchedulerMode == "builtin" {
-		go s.schedulerLoop()
-		log.Printf("[SERVER] Built-in FIFO scheduler enabled (interval=%ds)", s.cfg.SchedulerIteration)
-	} else {
-		log.Printf("[SERVER] External scheduler mode — built-in scheduler disabled")
+	go s.schedulerWatchLoop()
+
+	if s.cfg.SchedTriggerPort > 0 {
+		if s.externalSchedReachable() {
+			log.Printf("[SERVER] External scheduler (pbs_sched) detected on 127.0.0.1:%d", s.cfg.SchedTriggerPort)
+		} else {
+			s.lastSchedWarn = time.Now()
+			log.Printf("[SERVER] WARNING: external scheduler (pbs_sched) is NOT running on 127.0.0.1:%d; jobs will NOT be scheduled until it is started", s.cfg.SchedTriggerPort)
+		}
 	}
 
 	// Node health check
@@ -3364,35 +3350,31 @@ func (s *Server) startBackgroundTasks() {
 	go s.completedJobCleanup()
 }
 
-// schedulerLoop runs the built-in scheduler using a hybrid trigger model. It
-// waits on BOTH the periodic safety-net ticker (sched_interval, default 10s)
-// and an event channel signaled whenever a job or node event occurs (submit,
-// completion, requeue, hold release, node state change). Event-triggered
-// "limited" cycles respond quickly so jobs dispatch without waiting for the
-// ticker, while the periodic ticker remains the guaranteed fallback floor.
+// triggerSched is called whenever a job or node event occurs (submit,
+// completion, requeue, hold release, node change). It wakes the external
+// scheduler so a job is dispatched promptly without waiting for the polling
+// ticker; pbs_sched performs the placement.
 func (s *Server) triggerSched() {
-	// Notify the external scheduler daemon (pbs_sched) when one is configured.
-	// This makes the external scheduler event-driven instead of purely polling:
-	// a job/node event triggers a limited cycle immediately, while the polling
-	// ticker remains the guaranteed fallback floor.
-	if s.cfg.SchedulerMode == "external" && s.cfg.EventDriven && s.cfg.SchedTriggerPort > 0 {
+	if s.cfg.EventDriven && s.cfg.SchedTriggerPort > 0 {
 		s.notifyExternalSched()
 	}
-	// Notify the built-in scheduler (same event channel is used only when the
-	// built-in loop is running). Non-blocking send coalesces a burst of events
-	// into a single scheduling cycle.
-	if s.schedEvent == nil {
-		return
+}
+
+// externalSchedReachable reports whether pbs_sched is listening on the local
+// trigger socket. Used to surface a clear warning when the scheduler is down.
+func (s *Server) externalSchedReachable() bool {
+	addr := fmt.Sprintf("127.0.0.1:%d", s.cfg.SchedTriggerPort)
+	conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+	if err != nil {
+		return false
 	}
-	select {
-	case s.schedEvent <- struct{}{}:
-	default:
-	}
+	conn.Close()
+	return true
 }
 
 // notifyExternalSched pings the external pbs_sched trigger socket. It is
 // best-effort and non-blocking: a short timeout avoids stalling RPC handling,
-// and errors are ignored because the scheduler's polling ticker is the floor.
+// and errors are ignored because the scheduler polling ticker is the floor.
 func (s *Server) notifyExternalSched() {
 	addr := fmt.Sprintf("127.0.0.1:%d", s.cfg.SchedTriggerPort)
 	conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
@@ -3405,126 +3387,28 @@ func (s *Server) notifyExternalSched() {
 	conn.Write([]byte{1})
 }
 
-func (s *Server) schedulerLoop() {
-	minGap := time.Duration(s.cfg.SchedMinInterval) * time.Millisecond
-	if minGap <= 0 {
-		minGap = time.Millisecond
-	}
-	var lastRun time.Time
-
-	run := func(limited, deferWait bool) {
-		if !s.cfg.Scheduling {
-			return
-		}
-		// Anti-storm throttle: never run two cycles closer than
-		// sched_min_interval, and if defer is set wait the full gap so jobs
-		// can accumulate before the cycle runs (batching).
-		wait := 0 * time.Second
-		if !lastRun.IsZero() {
-			if d := time.Since(lastRun); d < minGap {
-				wait = minGap - d
-			}
-		}
-		if deferWait && wait < minGap {
-			wait = minGap
-		}
-		if wait > 0 {
-			select {
-			case <-time.After(wait):
-			case <-s.done:
-				return
-			}
-		}
-		s.runScheduler(limited)
-		lastRun = time.Now()
-	}
-
+// schedulerWatchLoop is the server-side companion to the external scheduler.
+// It runs on the sched_interval ticker and (a) promotes Waiting jobs whose
+// deferred execution time has passed so pbs_sched sees them as Queued, and
+// (b) re-warns (rate-limited) when pbs_sched is not reachable. All actual job
+// placement happens in the external pbs_sched daemon.
+func (s *Server) schedulerWatchLoop() {
 	for {
 		select {
 		case <-s.done:
 			return
 		case <-s.schedTicker.C:
-			// Full periodic sweep (the safety-net floor) — not queue-depth
-			// limited, catches anything the limited cycles left behind.
-			run(false, false)
-		case <-s.schedEvent:
-			// Event-driven cycle. If event-driven scheduling is disabled
-			// (legacy pure-poll behavior), ignore events and rely on ticker.
-			if !s.cfg.EventDriven {
-				continue
-			}
-			// Coalesce a burst: drain any further queued events so a large
-			// submission becomes a single cycle.
-			for draining := true; draining; {
-				select {
-				case <-s.schedEvent:
-				default:
-					draining = false
+			s.promoteWaitingJobs()
+			if s.cfg.SchedTriggerPort > 0 && !s.externalSchedReachable() {
+				if now := time.Now(); now.Sub(s.lastSchedWarn) >= 30*time.Second {
+					s.lastSchedWarn = now
+					log.Printf("[SERVER] WARNING: external scheduler (pbs_sched) is NOT running on 127.0.0.1:%d; jobs will NOT be scheduled until it is started", s.cfg.SchedTriggerPort)
 				}
 			}
-			run(true, s.cfg.SchedDefer || s.cfg.SchedDeferBatch)
 		}
 	}
 }
 
-// runScheduler is the built-in FIFO job scheduler. It iterates through queued
-// jobs and dispatches them to free nodes, promotes Waiting jobs whose execution
-// time has passed, and honors the SLURM-style caps. When limited (an
-// event-triggered cycle), it only attempts default_queue_depth jobs and starts
-// at most sched_max_job_start; the periodic full sweep is unlimited. Both
-// cycles respect max_sched_time by yielding to other RPC handling.
-func (s *Server) runScheduler(limited bool) {
-	// Check for Waiting jobs whose deferred execution time has passed
-	s.promoteWaitingJobs()
-
-	queued := s.jobMgr.QueuedJobs()
-	if len(queued) == 0 {
-		return
-	}
-
-	// Sort by queue time (FIFO order)
-	sort.Slice(queued, func(i, k int) bool {
-		return queued[i].QueueTime.Before(queued[k].QueueTime)
-	})
-
-	start := time.Now()
-	maxAttempt := len(queued)
-	maxStarts := 0
-	if limited {
-		if s.cfg.DefaultQueueDepth > 0 && s.cfg.DefaultQueueDepth < maxAttempt {
-			maxAttempt = s.cfg.DefaultQueueDepth
-		}
-		if s.cfg.SchedMaxJobStart > 0 {
-			maxStarts = s.cfg.SchedMaxJobStart
-		}
-	}
-
-	attempted := 0
-	started := 0
-	for _, j := range queued {
-		if attempted >= maxAttempt {
-			break
-		}
-		if s.cfg.MaxSchedTime > 0 && time.Since(start) >= time.Duration(s.cfg.MaxSchedTime)*time.Second {
-			log.Printf("[SCHED] max_sched_time=%ds reached, yielding scheduler cycle", s.cfg.MaxSchedTime)
-			break
-		}
-		j.Mu.RLock()
-		if j.State != job.StateQueued {
-			j.Mu.RUnlock()
-			continue
-		}
-		j.Mu.RUnlock()
-
-		attempted++
-		if s.scheduleJob(j) {
-			started++
-			if maxStarts > 0 && started >= maxStarts {
-				break
-			}
-		}
-	}
-}
 func (s *Server) promoteWaitingJobs() {
 	now := time.Now()
 	for _, j := range s.jobMgr.AllJobs() {
@@ -3660,119 +3544,6 @@ func (s *Server) resolveDependencies(completedJobID string, exitStatus int) {
 	}
 }
 
-// scheduleJob attempts to place a single job on a compute node and dispatch it.
-// nodeHasAllFeatures reports whether node n carries every required property.
-func nodeHasAllFeatures(n *node.Node, want []string) bool {
-	for _, f := range want {
-		found := false
-		for _, p := range n.Properties {
-			if strings.EqualFold(strings.TrimSpace(p), f) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-	}
-	return true
-}
-
-// queueNodeOK reports whether node n may be scheduled for a job in queue q,
-// enforcing the queue hostlist (node-pool binding) and naccesspolicy (1.5/1.6).
-func queueNodeOK(q *queue.Queue, n *node.Node) bool {
-	if q == nil {
-		return true
-	}
-	if len(q.HostList) > 0 {
-		ok := false
-		for _, h := range q.HostList {
-			h = strings.TrimSpace(h)
-			if h == "" {
-				continue
-			}
-			if strings.HasPrefix(h, "@") {
-				if n.HasGroup(strings.TrimPrefix(h, "@")) {
-					ok = true
-					break
-				}
-			} else if strings.EqualFold(n.Name, h) {
-				ok = true
-				break
-			}
-		}
-		if !ok {
-			return false
-		}
-	}
-	switch q.NaccessPolicy {
-	case "exclusive", "singleuser", "exclhost", "exec_host_exclusive":
-		if len(n.AssignedJobs) > 0 {
-			return false // only a fully idle node may take an exclusive job
-		}
-	}
-	return true
-}
-
-// selectNodeForJob picks a schedulable node honoring the job's host pin
-// (-l host=<node>), host group (-l host=@group, 1.3), and feature requirements
-// (-l feature=a,b), with at least neededSlots free CPUs. Local (static) nodes
-// are preferred over auto-registered cloud/dynamic nodes so cloud burst is only
-// used when local capacity is exhausted. Returns the node and slots to
-// allocate, or nil if no node qualifies.
-func (s *Server) selectNodeForJob(j *job.Job, neededSlots int) (*node.Node, int) {
-	host := strings.TrimSpace(j.ResourceReq["host"])
-	group := ""
-	if strings.HasPrefix(host, "@") {
-		group = strings.TrimPrefix(host, "@")
-		host = ""
-	}
-	var feats []string
-	for _, k := range []string{"feature", "features", "properties"} {
-		if v := j.ResourceReq[k]; v != "" {
-			feats = append(feats, queue.ParseList(v)...)
-		}
-	}
-	var best *node.Node
-	bestDyn := false
-	bestAvail := -1
-	queuePolicy := s.queueMgr.GetQueue(j.Queue)
-	for _, n := range s.nodeMgr.AllNodes() {
-		n.Mu.RLock()
-		ok := n.IsFree() && n.AvailableSlots() >= neededSlots
-		if ok && !queueNodeOK(queuePolicy, n) {
-			ok = false
-		}
-		if ok && host != "" && !strings.EqualFold(n.Name, host) {
-			ok = false
-		}
-		if ok && group != "" && !n.HasGroup(group) {
-			ok = false
-		}
-		if ok && len(feats) > 0 && !nodeHasAllFeatures(n, feats) {
-			ok = false
-		}
-		if ok && !s.nodeHasGRes(n, j) {
-			ok = false
-		}
-		dyn := n.Dynamic
-		avail := n.AvailableSlots()
-		n.Mu.RUnlock()
-		if !ok {
-			continue
-		}
-		if best == nil || (!dyn && bestDyn) || (dyn == bestDyn && avail < bestAvail) {
-			best = n
-			bestDyn = dyn
-			bestAvail = avail
-		}
-	}
-	if best == nil {
-		return nil, 0
-	}
-	return best, neededSlots
-}
-
 // parseNodeSelectSpec parses a TORQUE-style node request into a node count and
 // processors-per-node (ppn). It accepts:
 //
@@ -3820,189 +3591,6 @@ func (s *Server) jobNodeRequest(j *job.Job) (nodes, ppn int) {
 	}
 	n, pp := parseNodeSelectSpec(spec)
 	return n, pp
-}
-
-// selectNodesForJob picks up to nodeCount distinct schedulable nodes, each with
-// at least ppn free CPUs, honoring the job's host pin, host group, and feature
-// constraints. Returns nil when fewer than nodeCount distinct nodes qualify.
-func (s *Server) selectNodesForJob(j *job.Job, nodeCount, ppn int) []*node.Node {
-	host := ""
-	group := ""
-	{
-		j.Mu.RLock()
-		h := strings.TrimSpace(j.ResourceReq["host"])
-		j.Mu.RUnlock()
-		if strings.HasPrefix(h, "@") {
-			group = strings.TrimPrefix(h, "@")
-		} else {
-			host = h
-		}
-	}
-	var feats []string
-	j.Mu.RLock()
-	for _, k := range []string{"feature", "features", "properties"} {
-		if v := j.ResourceReq[k]; v != "" {
-			feats = append(feats, queue.ParseList(v)...)
-		}
-	}
-	// place=pack (default) packs onto fewer nodes; only a plain count matters
-	// here since we take the first nodeCount that qualify.
-	j.Mu.RUnlock()
-
-	var out []*node.Node
-	queuePolicy := s.queueMgr.GetQueue(j.Queue)
-	for _, n := range s.nodeMgr.AllNodes() {
-		n.Mu.RLock()
-		ok := n.IsFree() && n.AvailableSlots() >= ppn
-		if ok && !queueNodeOK(queuePolicy, n) {
-			ok = false
-		}
-		if ok && host != "" && !strings.EqualFold(n.Name, host) {
-			ok = false
-		}
-		if ok && group != "" && !n.HasGroup(group) {
-			ok = false
-		}
-		if ok && len(feats) > 0 && !nodeHasAllFeatures(n, feats) {
-			ok = false
-		}
-		if ok && !s.nodeHasGRes(n, j) {
-			ok = false
-		}
-		n.Mu.RUnlock()
-		if ok {
-			out = append(out, n)
-			if len(out) >= nodeCount {
-				break
-			}
-		}
-	}
-	if len(out) < nodeCount {
-		return nil
-	}
-	return out
-}
-
-// scheduleJobMulti allocates a multi-node job across nodeCount distinct nodes
-// (each with ppn free CPUs), records a multi-node exec_host, and dispatches the
-// job to every allocated node's MOM. Assumes dependency/run-limit checks passed.
-func (s *Server) scheduleJobMulti(j *job.Job, nodeCount, ppn int) bool {
-	selected := s.selectNodesForJob(j, nodeCount, ppn)
-	if len(selected) < nodeCount {
-		return false // not enough distinct nodes yet, try again next cycle
-	}
-	hosts := make([]string, 0, nodeCount)
-	for _, n := range selected {
-		hosts = append(hosts, n.Name+"/0")
-	}
-	execHost := strings.Join(hosts, "+")
-	momPort := selected[0].MomPort
-
-	j.Mu.Lock()
-	j.ExecHost = execHost
-	j.ExecPort = momPort
-	j.NodeCount = nodeCount
-	j.TaskCount = nodeCount * ppn
-	oldState := j.State
-	queueName := j.Queue
-	j.Mu.Unlock()
-
-	for _, n := range selected {
-		n.Mu.Lock()
-		n.AssignJob(j.ID, ppn)
-		n.Mu.Unlock()
-	}
-
-	s.jobMgr.UpdateJobState(j.ID, job.StateRunning, job.SubstateRunning)
-	if q := s.queueMgr.GetQueue(queueName); q != nil {
-		q.TransferJobState(oldState, job.StateRunning)
-	}
-	s.saveJob(j)
-
-	log.Printf("[SCHED] Dispatching multi-node job %s to %d nodes: %s", j.ID, nodeCount, execHost)
-	if s.acctLog != nil {
-		j.Mu.RLock()
-		info := s.buildJobInfo(j)
-		j.Mu.RUnlock()
-		s.acctLog.RecordStarted(j.ID, info)
-	}
-	for _, n := range selected {
-		go s.dispatchJobToMOM(j, n)
-	}
-	return true
-}
-func (s *Server) scheduleJob(j *job.Job) bool {
-	j.Mu.RLock()
-	if j.State != job.StateQueued {
-		j.Mu.RUnlock()
-		return false
-	}
-	j.Mu.RUnlock()
-
-	// Check job dependencies before scheduling
-	if !s.checkDependencies(j) {
-		return false // Dependencies not yet satisfied
-	}
-
-	// Check server-wide and per-user/group run limits
-	if !s.enforceRunLimits(j) {
-		return false // Limits exceeded, try again next cycle
-	}
-
-	// Multi-node request (-l nodes=N:ppn=M / select=): allocate N distinct nodes.
-	nodes, ppn := s.jobNodeRequest(j)
-	if nodes > 1 {
-		return s.scheduleJobMulti(j, nodes, ppn)
-	}
-
-	// Single-node path: find a node with enough free CPU slots for this job.
-	// Consume the job's actual requested CPUs (default 1) so node capacity is
-	// accounted per CPUReq instead of per job (see TODO 2.6).
-	neededSlots := jobRequestedCPUs(j)
-	n, slots := s.selectNodeForJob(j, neededSlots)
-	if n == nil {
-		return false // No free nodes, try again next cycle
-	}
-
-	// Reserve the node for this job
-	n.Mu.Lock()
-	n.AssignJob(j.ID, slots)
-	execHost := fmt.Sprintf("%s/0", n.Name)
-	momPort := n.MomPort
-	n.Mu.Unlock()
-
-	// Update job state to Running
-	j.Mu.Lock()
-	j.ExecHost = execHost
-	j.ExecPort = momPort
-	oldState := j.State
-	queueName := j.Queue
-	j.Mu.Unlock()
-
-	// Use manager's UpdateJobState to keep stateCounts in sync
-	s.jobMgr.UpdateJobState(j.ID, job.StateRunning, job.SubstateRunning)
-
-	// Update queue counters
-	if q := s.queueMgr.GetQueue(queueName); q != nil {
-		q.TransferJobState(oldState, job.StateRunning)
-	}
-
-	// Persist job state change
-	s.saveJob(j)
-
-	log.Printf("[SCHED] Dispatching job %s to %s (port %d)", j.ID, execHost, momPort)
-
-	// Write S (started) accounting record
-	if s.acctLog != nil {
-		j.Mu.RLock()
-		info := s.buildJobInfo(j)
-		j.Mu.RUnlock()
-		s.acctLog.RecordStarted(j.ID, info)
-	}
-
-	// Send job to MOM in a background goroutine
-	go s.dispatchJobToMOM(j, n)
-	return true
 }
 
 // runJobMulti allocates a multi-node job anchored on firstNode (the node chosen
@@ -4497,7 +4085,7 @@ func (s *Server) loadSchedConfig() {
 	configPath := filepath.Join(s.cfg.PBSHome, "sched_priv", "sched_config")
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return // Use defaults (builtin mode)
+		return // Use defaults (external mode; scheduler matches pbs_sched)
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
@@ -4521,9 +4109,12 @@ func (s *Server) loadSchedConfig() {
 		}
 		switch key {
 		case "scheduler_mode":
-			if val == "external" || val == "builtin" {
-				s.cfg.SchedulerMode = val
+			// The built-in scheduler was removed; the server always uses the
+			// external pbs_sched daemon. A stale "builtin" value is ignored.
+			if val == "builtin" {
+				log.Printf("[SERVER] WARNING: scheduler_mode \"builtin\" is no longer supported; using the external scheduler")
 			}
+			s.cfg.SchedulerMode = "external"
 		case "sched_interval":
 			if n, err := strconv.Atoi(val); err == nil {
 				s.cfg.SchedulerIteration = n

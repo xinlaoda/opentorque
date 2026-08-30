@@ -21,12 +21,10 @@ func newMoveServer(t *testing.T) (*Server, *job.Manager, *queue.Manager) {
 	}
 	jm := job.NewManager("srv", 1)
 	qm := queue.NewManager()
-	// schedEvent is intentionally nil: triggerSched returns early.
 	s := &Server{
-		cfg:       cfg,
-		jobMgr:    jm,
-		queueMgr:  qm,
-		schedEvent: nil,
+		cfg:      cfg,
+		jobMgr:   jm,
+		queueMgr: qm,
 	}
 	return s, jm, qm
 }
