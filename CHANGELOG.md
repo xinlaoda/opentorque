@@ -14,6 +14,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   server-side and mode-independent, so it works under the external scheduler too.
 - **External scheduler health warning.** When `pbs_sched` is not reachable on the
   trigger port, `pbs_server` logs a periodic `WARNING` so a missing scheduler is
+  not mistaken for a quiet cluster. Also, the server's `SchedTriggerPort` now
+  defaults to `25003` (matching `pbs_sched`) so event-driven external scheduling
+  and the health warning work with no configuration.
+  trigger port, `pbs_server` logs a periodic `WARNING` so a missing scheduler is
   not mistaken for a quiet cluster. No scheduler config is required (defaults are
   external + trigger port 25003).
 

@@ -287,6 +287,24 @@ Implemented in `internal/server/server.go`:
   `WARNING` on startup and in the watch loop.
 - Verified: `go vet` + `go test ./internal/...`, and `cmd/pbs_server` /
   `cmd/pbs_sched` build clean. Live test on Azure below.
+- **Important default fix:** the server's `SchedTriggerPort` default was
+  0 (only wired via `sched_config`), so event-driven external triggering and
+  the "scheduler not running" warning were off unless configured. It now
+  defaults to **25003** (matching `pbs_sched`'s default), so external
+  scheduling + the health warning work with **no config**.
+- Live test (2026-08-30, Azure subscription `dfcb03a2` / RG `xxin-opentorque-test` /
+  `xxin-opentorque-vm`, Ubuntu 24.04, 2-core, no `sched_config`): the server
+  started in external mode and logged
+  `WARNING: external scheduler (pbs_sched) is NOT running on 127.0.0.1:25003;
+  jobs will NOT be scheduled until it is started`; after starting `pbs_sched` it
+  logged `External scheduler (pbs_sched) detected on 127.0.0.1:25003` and the
+  warning stopped. A `sched_config` containing stale `scheduler_mode: builtin`
+  was ignored with `WARNING: scheduler_mode "builtin" is no longer supported`.
+  Jobs were dispatched by `pbs_sched` end-to-end (submit -> R -> C, exit 0),
+  incl. a 4-job burst on a 2-core node (2 concurrent, 2 queued). A deferred
+  `qsub -a` job sat in `W`, then auto-promoted to Queued (server
+  `promoteWaitingJobs`) and was dispatched by the external scheduler -> C exit 0.
+  `go vet ./...` + `go test ./...` all green on the VM.
 
 ---
 

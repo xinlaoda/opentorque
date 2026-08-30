@@ -160,6 +160,7 @@ func NewConfig(pbsHome string) *Config {
 		Scheduling:             true,
 		SchedulerMode:          "external",
 		SchedulerIteration:     10,
+		SchedTriggerPort:       25003,
 		EventDriven:            true,
 		SchedMinInterval:       100,
 		DefaultQueueDepth:      100,
