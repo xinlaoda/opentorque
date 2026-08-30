@@ -3329,6 +3329,24 @@ func (s *Server) startBackgroundTasks() {
 	s.schedTicker = time.NewTicker(schedInterval)
 	go s.schedulerWatchLoop()
 
+	// Shortly after startup, repeatedly reconcile recovered Running jobs with
+	// their MOMs (HA, TODO 5.1): only re-dispatch a job whose MOM confirms it is
+	// no longer running, so a still-running job is never executed twice after a
+	// failover. Retry a few times so MOMs that were still starting when the first
+	// pass ran get a chance to answer.
+	go func() {
+		for attempt := 0; attempt < 6; attempt++ {
+			select {
+			case <-time.After(5 * time.Second):
+			case <-s.done:
+				return
+			}
+			if s.reconcileRunningJobsWithMOMs() == 0 {
+				return
+			}
+		}
+	}()
+
 	if s.cfg.SchedTriggerPort > 0 {
 		if s.externalSchedReachable() {
 			log.Printf("[SERVER] External scheduler (pbs_sched) detected on 127.0.0.1:%d", s.cfg.SchedTriggerPort)
@@ -4047,6 +4065,191 @@ func (s *Server) requeueNodeJobs(nodeName string) {
 	s.triggerSched()
 }
 
+// batchMomStatusRequest is DIS opcode 63 (BatchMomStatus): the MOM request the
+// server sends to ask a MOM for its currently-running jobs (see
+// internal/mom/dis BatchMomStatus).
+const batchMomStatusRequest = 63
+
+// momAddr returns the "host:port" to reach a node's MOM daemon. The node's
+// known private IP is preferred (dynamic cloud nodes may not resolve via DNS);
+// otherwise the node name is used, which resolves for pre-provisioned nodes.
+func (s *Server) momAddr(n *node.Node) string {
+	n.Mu.RLock()
+	defer n.Mu.RUnlock()
+	host := n.Name
+	if n.IP != "" {
+		host = n.IP
+	}
+	port := n.MomPort
+	if port == 0 {
+		port = 15002 // default MOM service port
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+// momRunningJobs queries a MOM for the ids of the jobs it is currently running.
+// It returns (set, true) on success and (nil, false) if the MOM could not be
+// reached or did not answer. Mirrors the momctl BatchMomStatus "jobs" query.
+func (s *Server) momRunningJobs(momAddr string) (map[string]bool, bool) {
+	conn, err := net.DialTimeout("tcp", momAddr, 5*time.Second)
+	if err != nil {
+		return nil, false
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+
+	w := dis.NewWriter(conn)
+	if err := dis.WriteRequestHeader(w, batchMomStatusRequest, s.cfg.ServerName); err != nil {
+		return nil, false
+	}
+	if err := w.WriteString("jobs"); err != nil {
+		return nil, false
+	}
+	if err := w.WriteUint(0); err != nil { // request extension (none)
+		return nil, false
+	}
+	if err := w.Flush(); err != nil {
+		return nil, false
+	}
+
+	r := dis.NewReader(conn)
+	_, _ = r.ReadUint() // protocol
+	_, _ = r.ReadUint() // version
+	code, err := r.ReadInt()
+	if err != nil {
+		return nil, false
+	}
+	_, _ = r.ReadInt() // auxcode
+	choice, _ := r.ReadUint()
+	if code != 0 || choice != dis.ReplyChoiceText {
+		return nil, false
+	}
+	val, err := r.ReadString()
+	if err != nil {
+		return nil, false
+	}
+	set := make(map[string]bool)
+	for _, id := range strings.Split(val, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			set[id] = true
+		}
+	}
+	return set, true
+}
+
+// restoreRecoveredRunningJobs re-creates per-node scheduling state for running
+// jobs recovered from disk (assigns their CPU slots), so the scheduler sees the
+// correct free capacity and does not treat a still-running job as schedulable.
+func (s *Server) restoreRecoveredRunningJobs() {
+	for _, j := range s.jobMgr.AllJobs() {
+		j.Mu.RLock()
+		if j.State != job.StateRunning || j.ExecHost == "" {
+			j.Mu.RUnlock()
+			continue
+		}
+		hosts := strings.Split(j.ExecHost, "+")
+		j.Mu.RUnlock()
+		_, ppn := s.jobNodeRequest(j)
+		if ppn < 1 {
+			ppn = 1
+		}
+		for _, h := range hosts {
+			name := strings.Split(h, "/")[0]
+			n := s.nodeMgr.GetNode(name)
+			if n == nil {
+				continue
+			}
+			n.Mu.Lock()
+			assigned := false
+			for _, jid := range n.AssignedJobs {
+				if jid == j.ID {
+					assigned = true
+					break
+				}
+			}
+			if !assigned {
+				n.AssignJob(j.ID, ppn)
+			}
+			n.Mu.Unlock()
+		}
+	}
+}
+
+// reconcileRunningJobsWithMOMs re-checks recovered Running jobs against each
+// MOM shortly after startup (HA, TODO 5.1). A Running job is requeued ONLY when
+// its MOM is reachable and explicitly confirms the job is NOT running there
+// (the process is gone - it finished during the outage without a surviving
+// obituary). Jobs on unreachable MOMs, or confirmed still running, stay Running,
+// so a live job is never re-dispatched (no double execution). Truly-dead nodes
+// are handled later by the node-down path (TODO 2.10).
+func (s *Server) reconcileRunningJobsWithMOMs() int {
+	pending := 0
+	for _, j := range s.jobMgr.AllJobs() {
+		j.Mu.RLock()
+		if j.State != job.StateRunning || j.ExecHost == "" {
+			j.Mu.RUnlock()
+			continue
+		}
+		execHost := j.ExecHost
+		jobID := j.ID
+		j.Mu.RUnlock()
+
+		firstHost := strings.Split(strings.Split(execHost, "+")[0], "/")[0]
+		n := s.nodeMgr.GetNode(firstHost)
+		if n == nil {
+			continue
+		}
+		runningSet, ok := s.momRunningJobs(s.momAddr(n))
+		if !ok {
+			pending++ // MOM unreachable now: retry later; assume still running
+			continue
+		}
+		if runningSet[jobID] {
+			continue // confirmed still running: never re-dispatch
+		}
+		s.requeueRecoveredJob(j)
+	}
+	return pending
+}
+
+// requeueRecoveredJob requeues a Running job whose MOM confirmed it is no
+// longer running: releases its node slots, clears the exec host, returns it to
+// Queued and wakes the scheduler.
+func (s *Server) requeueRecoveredJob(j *job.Job) {
+	j.Mu.RLock()
+	queueName := j.Queue
+	jobID := j.ID
+	execHost := j.ExecHost
+	j.Mu.RUnlock()
+
+	_, ppn := s.jobNodeRequest(j)
+	if ppn < 1 {
+		ppn = 1
+	}
+	for _, h := range strings.Split(execHost, "+") {
+		name := strings.Split(h, "/")[0]
+		if n := s.nodeMgr.GetNode(name); n != nil {
+			n.Mu.Lock()
+			n.ReleaseJob(jobID, ppn)
+			n.Mu.Unlock()
+		}
+	}
+
+	j.Mu.Lock()
+	oldState := j.State
+	j.ExecHost = ""
+	j.ExecPort = 0
+	j.SetState(job.StateQueued, job.SubstateQueued)
+	j.Mu.Unlock()
+
+	if q := s.queueMgr.GetQueue(queueName); q != nil {
+		q.TransferJobState(oldState, job.StateQueued)
+	}
+	s.saveJob(j)
+	log.Printf("[SERVER] MOM confirmed job %s no longer running; requeued for reschedule", jobID)
+	s.triggerSched()
+}
+
 // completedJobCleanup periodically removes old completed jobs.
 func (s *Server) completedJobCleanup() {
 	ticker := time.NewTicker(60 * time.Second)
@@ -4164,6 +4367,11 @@ func (s *Server) recoverState() error {
 
 	// Recover jobs
 	s.recoverJobs()
+
+	// Restore on-node slot accounting for recovered Running jobs so the
+	// external scheduler sees correct free capacity and does not re-dispatch
+	// a job that is (still) running (HA, TODO 5.1).
+	s.restoreRecoveredRunningJobs()
 
 	return nil
 }
@@ -4745,14 +4953,15 @@ func (s *Server) recoverJobs() {
 			continue
 		}
 
-		// Re-queue running jobs that weren't actually running (server restart).
+		// Running jobs are kept Running (not requeued) so that, after a server
+		// crash/failover, a job that a MOM is genuinely still executing is not
+		// re-dispatched (which would run it twice). Slot accounting is restored
+		// in restoreRecoveredRunningJobs and the MOM reconciliation pass
+		// (reconcileRunningJobsWithMOMs) later requeues a Running job whose MOM
+		// confirms it is no longer running.
 		// PROVISIONING jobs remain PROVISIONING: the CEC will reconcile on the
 		// next capacity event (either the VM eventually comes up, or the job
 		// is timed out and returned to Q).
-		if j.State == job.StateRunning {
-			j.SetState(job.StateQueued, job.SubstateQueued)
-			j.ExecHost = ""
-		}
 
 		s.jobMgr.AddJob(j)
 		if q := s.queueMgr.GetQueue(j.Queue); q != nil {

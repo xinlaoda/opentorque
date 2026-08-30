@@ -774,9 +774,32 @@ total/free cores into the server status, surfaced by `qstat -B -f`:
   starting a new instance of the same job, and removes the sidecar on cleanup
   (commits d5fe0ed + e7ef26a).
 
-### 5.1 HA / failover  [GAP]
+### 5.1 HA / failover  [GAP - crash-recovery foundation done (TODO 5.1 Phase 0)]
 Single `pbs_server`; no active/passive failover, no job migration, no server
-redundancy used in production.
+redundancy used in production. (The full failover infra is still open.)
+
+**Phase 0 done (2026-08-30):** startup/takeover reconciliation so a running
+job is never re-dispatched after a server crash, and orphans are requeued.
+- `recoverJobs` (internal/server) now keeps Running jobs Running (instead of
+  blindly requeueing them) and `restoreRecoveredRunningJobs` rebuilds the node's
+  slot accounting, so a job a MOM is still executing continues and is never run
+  twice.
+- MOM (`internal/mom/mom/daemon.go handleMomStatus`) now reports its
+  currently-running job ids (attr `jobs`).
+- Server queries each MOM (`reconcileRunningJobsWithMOMs`, retried a few seconds
+  after startup) and requeues a Running job ONLY when its MOM is reachable and
+  confirms it is no longer running; jobs on unreachable MOMs stay Running (the
+  node-down path, TODO 2.10, cleans up truly-dead nodes). Safe against double
+  execution.
+- Unit tests: internal/server/reconcile_test.go.
+- Live test (2026-08-30, Azure): a `sleep 120` job went Running; `pbs_server`
+  was killed (head-node crash) while the MOM kept the job; after server restart
+  the reconcile confirmed the job was still running -> it stayed Running, was
+  dispatched exactly once, and completed exit=0 at full 2:00 runtime. A leftover
+  orphan (stuck Running after a MOM restart) was correctly requeued, returning
+  the node to free.
+- Remaining for full HA: active/standby (shared storage + VIP + fencing) or
+  auto-scale single-master; see design notes.
 
 ### 5.2 Completed-job status read-back  [DONE - implemented & tested]
 Finished jobs now keep their full attribute set and remain queryable through the

@@ -852,6 +852,17 @@ func (d *Daemon) handleMomStatus(conn net.Conn, reader *dis.Reader, header *dis.
 	shortHost := strings.Split(hostname, ".")[0]
 	attrs := server.BuildMomStatusAttrs(status, shortHost)
 
+	// Report the ids of the jobs this MOM is currently running. The server
+	// uses this during startup/takeover reconciliation so it never re-dispatches
+	// a job that is still running here (HA, TODO 5.1). momctl -q jobs shows it.
+	if running := d.jobMgr.RunningJobs(); len(running) > 0 {
+		ids := make([]string, 0, len(running))
+		for _, j := range running {
+			ids = append(ids, j.ID)
+		}
+		attrs["jobs"] = strings.Join(ids, ",")
+	}
+
 	if attr == "all" || attr == "" {
 		keys := make([]string, 0, len(attrs))
 		for k := range attrs {

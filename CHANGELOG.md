@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **HA crash-recovery reconciliation (TODO 5.1 Phase 0).** On server start
+  `recoverJobs` keeps Running jobs Running and `restoreRecoveredRunningJobs`
+  rebuilds node slot accounting, so a job a MOM is still executing continues
+  after a server crash/failover. The MOM now answers a `jobs` status query, and
+  the server (`reconcileRunningJobsWithMOMs`) requeues a Running job only when
+  its MOM confirms it is no longer running - no double execution, orphans
+  requeued. Unit tests in internal/server/reconcile_test.go.
+
 - **Removed the built-in (in-process FIFO) scheduler.** The external `pbs_sched`
   is now the only scheduler and the default; `scheduler_mode: builtin` is ignored
   (server always uses `external`). Deferred (`-a`/Waiting) job promotion is now
