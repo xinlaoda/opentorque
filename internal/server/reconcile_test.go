@@ -43,11 +43,13 @@ func fakeMom(t *testing.T, jobsText string) (port int, closeFn func()) {
 // newReconcileServer builds a Server with in-memory managers for reconciliation
 // tests. The node added later is addressed at 127.0.0.1:<fake mom port>.
 func newReconcileServer(t *testing.T) *Server {
+	cfg := &config.Config{JobsDir: t.TempDir(), ServerName: "srv"}
 	return &Server{
-		cfg:      &config.Config{JobsDir: t.TempDir(), ServerName: "srv"},
+		cfg:      cfg,
 		jobMgr:   job.NewManager("srv", 1),
 		queueMgr: queue.NewManager(),
 		nodeMgr:  node.NewManager(),
+		store:    NewStore(cfg),
 	}
 }
 

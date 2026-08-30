@@ -25,6 +25,7 @@ func newMoveServer(t *testing.T) (*Server, *job.Manager, *queue.Manager) {
 		cfg:      cfg,
 		jobMgr:   jm,
 		queueMgr: qm,
+		store:    NewStore(cfg),
 	}
 	return s, jm, qm
 }

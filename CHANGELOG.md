@@ -16,6 +16,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   its MOM confirms it is no longer running - no double execution, orphans
   requeued. Unit tests in internal/server/reconcile_test.go.
 
+- **Persistence abstraction (`ServerStore`, HA groundwork).** Introduced the
+  `Store` interface + `FileStore` backend in `internal/server/store.go`; the
+  server now persists serverdb / queues / nodes / jobs+scripts through it,
+  with `FileStore` reproducing the exact on-disk layout and write-then-rename
+  behavior (a behavior-preserving refactor). Paves the way for a PostgreSQL
+  backend for multi-master HA (TODO 5.1).
+
 - **Removed the built-in (in-process FIFO) scheduler.** The external `pbs_sched`
   is now the only scheduler and the default; `scheduler_mode: builtin` is ignored
   (server always uses `external`). Deferred (`-a`/Waiting) job promotion is now

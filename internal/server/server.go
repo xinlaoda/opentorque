@@ -39,6 +39,7 @@ type Server struct {
 	jobMgr   *job.Manager
 	queueMgr *queue.Manager
 	nodeMgr  *node.Manager
+	store    Store
 	listener net.Listener
 
 	// Server state
@@ -97,6 +98,7 @@ func New(cfg *Config) (*Server, error) {
 		jobMgr:   job.NewManager(hostname, 0),
 		queueMgr: queue.NewManager(),
 		nodeMgr:  node.NewManager(),
+		store:    NewStore(icfg),
 		state:    SvStateInit,
 		done:     make(chan struct{}),
 	}
@@ -659,9 +661,8 @@ func (s *Server) handleJobScript(conn net.Conn, r *dis.Reader, hdr *dis.RequestH
 	j.Script = string(data)
 	j.Mu.Unlock()
 
-	// Save script to disk for persistence
-	scriptPath := filepath.Join(s.cfg.JobsDir, jobID+".SC")
-	os.WriteFile(scriptPath, data, 0700)
+	// Persist the job script so it survives a server restart / re-dispatch
+	s.store.SaveJobScript(jobID, data)
 
 	log.Printf("[SERVER] JobScript for %s (%d bytes)", jobID, len(data))
 
@@ -808,7 +809,7 @@ func (s *Server) processJobArray(j *job.Job, owner string) (bool, error) {
 		task.ID = fmt.Sprintf("%s[%d].%s", base, i, server)
 		s.jobMgr.AddJob(task)
 		created = append(created, task)
-		os.WriteFile(filepath.Join(s.cfg.JobsDir, task.ID+".SC"), []byte(script), 0700)
+		s.store.SaveJobScript(task.ID, []byte(script))
 	}
 	for _, task := range created {
 		if err := s.commitJobInstance(task, owner); err != nil {
@@ -4379,7 +4380,7 @@ func (s *Server) recoverState() error {
 // recoverServerDB loads the server database file.
 // Supports both Go simple format (key=value) and C XML format (<nextjobid>N</nextjobid>).
 func (s *Server) recoverServerDB() {
-	data, err := os.ReadFile(s.cfg.ServerDB)
+	data, err := s.store.LoadServerDB()
 	if err != nil {
 		if s.cfg.StartType == "create" {
 			log.Printf("[SERVER] Creating new server database")
@@ -4731,19 +4732,12 @@ func extractXMLTag(content, tag string) string {
 
 // recoverQueues loads queue definitions from disk.
 func (s *Server) recoverQueues() {
-	entries, err := os.ReadDir(s.cfg.QueuesDir)
+	fileQueues, err := s.store.LoadQueues()
 	if err != nil {
 		return
 	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(s.cfg.QueuesDir, e.Name()))
-		if err != nil {
-			continue
-		}
-		q := queue.NewQueue(e.Name(), queue.TypeExecution)
+	for qname, data := range fileQueues {
+		q := queue.NewQueue(qname, queue.TypeExecution)
 		content := string(data)
 
 		// Detect XML format (C pbs_server)
@@ -4864,7 +4858,7 @@ func (s *Server) recoverQueues() {
 
 // recoverNodes loads the nodes file.
 func (s *Server) recoverNodes() {
-	data, err := os.ReadFile(s.cfg.NodesFile)
+	data, err := s.store.LoadNodes()
 	if err != nil {
 		return
 	}
@@ -4926,19 +4920,11 @@ func (s *Server) recoverNodes() {
 
 // recoverJobs loads saved jobs from the jobs directory.
 func (s *Server) recoverJobs() {
-	entries, err := os.ReadDir(s.cfg.JobsDir)
+	fileJobs, err := s.store.LoadJobs()
 	if err != nil {
 		return
 	}
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".JB") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(s.cfg.JobsDir, e.Name()))
-		if err != nil {
-			continue
-		}
-		jobID := strings.TrimSuffix(e.Name(), ".JB")
+	for jobID, data := range fileJobs {
 		j := deserializeJob(string(data), jobID, s.cfg.ServerName)
 
 		// Completed jobs are reloaded so finished-job read-back survives a
@@ -5144,10 +5130,7 @@ func (s *Server) saveServerDB() {
 
 	sb.WriteString("</server_db>\n")
 
-	tmpFile := s.cfg.ServerDB + ".new"
-	if err := os.WriteFile(tmpFile, []byte(sb.String()), 0640); err == nil {
-		os.Rename(tmpFile, s.cfg.ServerDB)
-	}
+	s.store.SaveServerDB([]byte(sb.String()))
 }
 
 // saveQueue writes a queue definition to disk.
@@ -5285,11 +5268,7 @@ func (s *Server) saveQueue(q *queue.Queue) {
 	for resc, v := range q.ResourceDflt {
 		sb.WriteString("resources_default." + resc + "=" + v + "\n")
 	}
-	path := filepath.Join(s.cfg.QueuesDir, q.Name)
-	tmpFile := path + ".new"
-	if err := os.WriteFile(tmpFile, []byte(sb.String()), 0640); err == nil {
-		os.Rename(tmpFile, path)
-	}
+	s.store.SaveQueue(q.Name, []byte(sb.String()))
 }
 
 // saveNodes writes the nodes inventory file.
@@ -5313,10 +5292,7 @@ func (s *Server) saveNodes() {
 		sb.WriteString(fmt.Sprintf("%s np=%d%s\n", n.Name, n.NumProcs, extra))
 		n.Mu.RUnlock()
 	}
-	tmpFile := s.cfg.NodesFile + ".new"
-	if err := os.WriteFile(tmpFile, []byte(sb.String()), 0640); err == nil {
-		os.Rename(tmpFile, s.cfg.NodesFile)
-	}
+	s.store.SaveNodes([]byte(sb.String()))
 }
 
 // saveJob writes a job's state to disk.
@@ -5440,17 +5416,12 @@ func (s *Server) saveJob(j *job.Job) {
 	payload := serializeJob(j)
 	j.Mu.RUnlock()
 
-	path := filepath.Join(s.cfg.JobsDir, j.ID+".JB")
-	tmpFile := path + ".new"
-	if err := os.WriteFile(tmpFile, []byte(payload), 0640); err == nil {
-		os.Rename(tmpFile, path)
-	}
+	s.store.SaveJob(j.ID, []byte(payload))
 }
 
 // removeJobFiles cleans up all files for a given job.
 func (s *Server) removeJobFiles(jobID string) {
-	os.Remove(filepath.Join(s.cfg.JobsDir, jobID+".JB"))
-	os.Remove(filepath.Join(s.cfg.JobsDir, jobID+".SC"))
+	s.store.DeleteJob(jobID)
 }
 
 // --- Privileged Port Helper ---

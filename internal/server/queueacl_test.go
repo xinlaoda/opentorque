@@ -3,13 +3,14 @@ package server
 import (
 	"testing"
 
+	"github.com/xinlaoda/opentorque/internal/config"
 	"github.com/xinlaoda/opentorque/internal/job"
 	"github.com/xinlaoda/opentorque/internal/queue"
 )
 
 // TestQueueAllowsSubmitHost verifies queue-level acl_hosts on submission (1.6).
 func TestQueueAllowsSubmitHost(t *testing.T) {
-	s := &Server{queueMgr: queue.NewManager()}
+	s := &Server{queueMgr: queue.NewManager(), store: NewStore(config.NewConfig("/tmp"))}
 	q := queue.NewQueue("batch", queue.TypeExecution)
 	q.ACLHostEnabled = true
 	q.ACLHosts = []string{"submit01", "submit02"}

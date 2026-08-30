@@ -37,6 +37,7 @@ func TestPoolFreeCoresSnapshot(t *testing.T) {
 		nodeMgr:  node.NewManager(),
 		jobMgr:   job.NewManager("srv", 1),
 		queueMgr: queue.NewManager(),
+		store:    NewStore(cfg),
 	}
 
 	// batch pool: w1 up 4 cores/1 used; w2 down 2 cores (down is excluded).

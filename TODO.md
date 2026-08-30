@@ -798,6 +798,10 @@ job is never re-dispatched after a server crash, and orphans are requeued.
   dispatched exactly once, and completed exit=0 at full 2:00 runtime. A leftover
   orphan (stuck Running after a MOM restart) was correctly requeued, returning
   the node to free.
+- (2026-08-30) Persistence groundwork: added `Store` interface + `FileStore`
+  (internal/server/store.go) as a behavior-preserving refactor of the server's
+  file persistence, so a PostgreSQL backend (`PostgresStore`) can be added for
+  multi-master HA later.
 - Remaining for full HA: active/standby (shared storage + VIP + fencing) or
   auto-scale single-master; see design notes.
 
