@@ -16,6 +16,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   its MOM confirms it is no longer running - no double execution, orphans
   requeued. Unit tests in internal/server/reconcile_test.go.
 
+- **Floating-VIP address failover (TODO 5.1).** The active master binds a
+  configurable floating address (`PBS_HA_VIP`/`PBS_HA_VIP_DEV`); on lease loss
+  or graceful shutdown it releases it, and the standby that takes over binds it   again - so clients and MOMs that connect to the VIP transparently reach the
+  new active master after failover. Live-verified on Azure: A bound the VIP,
+  released it on graceful shutdown, then B (post-takeover) re-bound it.
+
 - **Multi-master HA leader election (TODO 5.1).** With `PBS_HA=1`, `pbs_server`
   instances share the PostgreSQL store and elect a leader via an `ot_lease`
   row (10s TTL, 3s renewal). The active holder dispatches jobs and wakes the

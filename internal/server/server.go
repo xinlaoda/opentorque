@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -46,7 +47,12 @@ type Server struct {
 	haEnabled bool
 	haActive  int32 // 1 = active (lease holder / single master), 0 = standby
 	haHolder  string
-	listener  net.Listener
+
+	// Floating VIP bound only while active (client/MOM address failover);
+	// clients and MOMs connect to the VIP, which always points at the active host
+	haVIP    string
+	haVIPDev string
+	listener net.Listener
 
 	// Server state
 	mu        sync.RWMutex
@@ -110,6 +116,13 @@ func New(cfg *Config) (*Server, error) {
 	}
 
 	s.haHolder = fmt.Sprintf("%s:%d", icfg.ServerName, icfg.Port) // unique per instance
+	if v := os.Getenv("PBS_HA_VIP"); v != "" {
+		s.haVIP = v
+		s.haVIPDev = os.Getenv("PBS_HA_VIP_DEV")
+		if s.haVIPDev == "" {
+			s.haVIPDev = "eth0"
+		}
+	}
 	if os.Getenv("PBS_HA") != "" {
 		s.haEnabled = true
 		s.haActive = 0 // starts standby until it acquires the lease
@@ -3481,6 +3494,11 @@ func (s *Server) haLeaderLoop() {
 	for {
 		select {
 		case <-s.done:
+			// If we were the active holder, release the floating VIP so the
+			// standby that takes over can bind it (client/MOM address failover).
+			if atomic.LoadInt32(&s.haActive) == 1 {
+				s.haReleaseVIP()
+			}
 			return
 		case <-ticker.C:
 			acquired, err := ps.TryAcquireLease(s.haHolder, ttl)
@@ -3492,12 +3510,51 @@ func (s *Server) haLeaderLoop() {
 				if atomic.CompareAndSwapInt32(&s.haActive, 0, 1) {
 					log.Printf("[SERVER] Acquired HA leader lease; taking over as active")
 					s.reconcileRunningJobsWithMOMs()
+					s.haBindVIP()
 				}
 			} else if atomic.CompareAndSwapInt32(&s.haActive, 1, 0) {
 				log.Printf("[SERVER] Lost HA leader lease; standing by")
+				s.haReleaseVIP()
 			}
 		}
 	}
+}
+
+// haBindVIP attaches the floating VIP to this host's interface. It is called
+// when this instance becomes the active master so clients and MOMs that connect
+// to the VIP are served by the active. Binding an already-present address is a
+// harmless no-op (ignored "File exists").
+func (s *Server) haBindVIP() {
+	if s.haVIP == "" {
+		return
+	}
+	out, err := exec.Command("ip", "addr", "add", s.haVIP, "dev", s.haVIPDev).CombinedOutput()
+	outStr := string(out)
+	if err != nil {
+		if !strings.Contains(outStr, "File exists") {
+			log.Printf("[SERVER] HA VIP bind %s on %s failed: %v %s", s.haVIP, s.haVIPDev, err, outStr)
+		}
+		return
+	}
+	log.Printf("[SERVER] HA VIP bound %s on %s (active)", s.haVIP, s.haVIPDev)
+}
+
+// haReleaseVIP removes the floating VIP from this host's interface so a
+// standby that takes over can bind it. Removing an address this host does not
+// own is a harmless no-op (ignored "Cannot assign").
+func (s *Server) haReleaseVIP() {
+	if s.haVIP == "" {
+		return
+	}
+	out, err := exec.Command("ip", "addr", "del", s.haVIP, "dev", s.haVIPDev).CombinedOutput()
+	outStr := string(out)
+	if err != nil {
+		if !strings.Contains(outStr, "Cannot assign") {
+			log.Printf("[SERVER] HA VIP release %s from %s failed: %v %s", s.haVIP, s.haVIPDev, err, outStr)
+		}
+		return
+	}
+	log.Printf("[SERVER] HA VIP released %s from %s", s.haVIP, s.haVIPDev)
 }
 
 func (s *Server) promoteWaitingJobs() {

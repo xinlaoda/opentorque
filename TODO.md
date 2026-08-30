@@ -806,9 +806,11 @@ job is never re-dispatched after a server crash, and orphans are requeued.
   lease elects the active `pbs_server`; standbys are gated from dispatching,
   and a standby taking over runs the running-job reconciliation. Live takeover
   tested (A=active runs a job; kill A -> B acquires lease and becomes active).
-  Remaining for full HA: client/MOM address failover to the new active (VIP /
-  load balancer in front of the shared PG), and fencing in the standbys' own
-  store before it fully replaces a firewall-based split-brain guard.
+  Floating-VIP address failover implemented (`PBS_HA_VIP`): the active binds the
+  VIP, releases it on loss/shutdown, and the taking-over standby rebinds it so
+  clients/MOMs at the VIP follow the leader (verified live on Azure).
+  Remaining for full HA: a true cross-host test (two VMs, each with its own MOM,
+  sharing one PG/VIP), and fencing to strictly guard against split-brain.
 - Remaining for full HA: active/standby (shared storage + VIP + fencing) or
   auto-scale single-master; see design notes.
 
