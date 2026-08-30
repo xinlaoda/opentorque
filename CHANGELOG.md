@@ -16,6 +16,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   its MOM confirms it is no longer running - no double execution, orphans
   requeued. Unit tests in internal/server/reconcile_test.go.
 
+- **Multi-master HA leader election (TODO 5.1).** With `PBS_HA=1`, `pbs_server`
+  instances share the PostgreSQL store and elect a leader via an `ot_lease`
+  row (10s TTL, 3s renewal). The active holder dispatches jobs and wakes the
+  scheduler; standbys do not notify their scheduler (`triggerSched` gated) nor
+  accept `RunJob` (`handleRunJob` gated). On lease expiry a standby acquires
+  the lease, marks itself active and runs the running-job reconciliation so
+  live jobs continue without re-dispatch. Unit test `TestPostgresLease`.
+  Live-tested on Azure with two `pbs_server` instances on one PostgreSQL: A
+  holds the lease and runs a job; after A is killed, B acquires the lease and
+  logs `Acquired HA leader lease; taking over as active`. (Client/MOM
+  address failover to the new active still needs a VIP/load-balancer in
+  front - deployment infra, not yet wired.)
+
 - **PostgreSQL state store (`PostgresStore`, HA).** Added a `PostgresStore`
   backend behind the `Store` interface (selectable via the `PBS_PG_DSN` env
   var), storing serverdb / queues / nodes / jobs+scripts as blobs in

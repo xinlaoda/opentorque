@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 )
 
 // TestPostgresStoreRoundTrip exercises the PostgreSQL store end-to-end. It is
@@ -70,5 +71,41 @@ func TestPostgresStoreRoundTrip(t *testing.T) {
 	jobs, _ = st.LoadJobs()
 	if _, ok := jobs["1.srv"]; ok {
 		t.Fatal("job not deleted")
+	}
+}
+
+// TestPostgresLease verifies HA leader-election exclusivity and takeover: a
+// second instance cannot take the lease while the holder is alive, but it can
+// once the holder's lease expires (simulating the active crashing).
+func TestPostgresLease(t *testing.T) {
+	dsn := os.Getenv("PBS_PG_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set PBS_PG_TEST_DSN to run the PostgreSQL HA lease test")
+	}
+	st, err := NewPostgresStore(dsn)
+	if err != nil {
+		t.Fatalf("NewPostgresStore: %v", err)
+	}
+	defer st.Close()
+	// clear any prior lease
+	if _, err := st.pool.Exec(context.Background(), "DELETE FROM ot_lease"); err != nil {
+		t.Fatalf("clear lease: %v", err)
+	}
+
+	if got, err := st.TryAcquireLease("masterA", 3*time.Second); err != nil || !got {
+		t.Fatalf("A should acquire first: got=%v err=%v", got, err)
+	}
+	// B cannot take it while A holds a fresh lease
+	if got, err := st.TryAcquireLease("masterB", 3*time.Second); err != nil || got {
+		t.Fatalf("B must NOT take an unexpired lease: got=%v err=%v", got, err)
+	}
+	// A can renew (still holder)
+	if got, err := st.TryAcquireLease("masterA", 3*time.Second); err != nil || !got {
+		t.Fatalf("A should renew: got=%v err=%v", got, err)
+	}
+	// Let A's lease expire (A stops renewing), then B takes over
+	time.Sleep(4 * time.Second)
+	if got, err := st.TryAcquireLease("masterB", 3*time.Second); err != nil || !got {
+		t.Fatalf("B should take over after expiry: got=%v err=%v", got, err)
 	}
 }

@@ -62,6 +62,12 @@ CREATE TABLE IF NOT EXISTS ot_jobs(
     attrs  BYTEA NOT NULL DEFAULT ''::bytea,
     script BYTEA NOT NULL DEFAULT ''::bytea
 );
+CREATE TABLE IF NOT EXISTS ot_lease(
+    k         TEXT PRIMARY KEY,
+    holder    TEXT NOT NULL,
+    heartbeat BIGINT NOT NULL,
+    expires   BIGINT NOT NULL
+);
 `
 	_, err := pool.Exec(ctx, ddl)
 	return err
@@ -233,4 +239,32 @@ func MigrateFilesToPostgres(cfg *config.Config, dsn string) error {
 		}
 	}
 	return nil
+}
+
+// TryAcquireLease attempts to become (or renew) the HA leader lease. It returns
+// true when this instance is the lease holder afterwards: either it acquired a
+// free/expired lease, or it already held it and renewed. Returns false when the
+// lease is held by another, non-expired holder (so this instance should stay a
+// standby). holder is this server's identity (its server name); ttl is how long
+// a lease lasts without renewal.
+func (p *PostgresStore) TryAcquireLease(holder string, ttl time.Duration) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	now := time.Now().Unix()
+	expires := now + int64(ttl.Seconds())
+	// Take the lease if it is free / expired, or if we already hold it (renew).
+	_, err := p.pool.Exec(ctx, `
+		INSERT INTO ot_lease(k, holder, heartbeat, expires) VALUES('leader',$1,$2,$3)
+		ON CONFLICT(k) DO UPDATE
+		  SET holder=EXCLUDED.holder, heartbeat=EXCLUDED.heartbeat, expires=EXCLUDED.expires
+		  WHERE ot_lease.expires < $2 OR ot_lease.holder=$1`,
+		holder, now, expires)
+	if err != nil {
+		return false, err
+	}
+	var h string
+	if err := p.pool.QueryRow(ctx, "SELECT holder FROM ot_lease WHERE k='leader'").Scan(&h); err != nil {
+		return false, err
+	}
+	return h == holder, nil
 }

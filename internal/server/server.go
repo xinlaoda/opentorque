@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xinlaoda/opentorque/internal/acct"
@@ -40,7 +41,12 @@ type Server struct {
 	queueMgr *queue.Manager
 	nodeMgr  *node.Manager
 	store    Store
-	listener net.Listener
+
+	// HA (multi-master, shared PostgreSQL): leader lease via the store
+	haEnabled bool
+	haActive  int32 // 1 = active (lease holder / single master), 0 = standby
+	haHolder  string
+	listener  net.Listener
 
 	// Server state
 	mu        sync.RWMutex
@@ -101,6 +107,14 @@ func New(cfg *Config) (*Server, error) {
 		store:    NewStore(icfg),
 		state:    SvStateInit,
 		done:     make(chan struct{}),
+	}
+
+	s.haHolder = fmt.Sprintf("%s:%d", icfg.ServerName, icfg.Port) // unique per instance
+	if os.Getenv("PBS_HA") != "" {
+		s.haEnabled = true
+		s.haActive = 0 // starts standby until it acquires the lease
+	} else {
+		s.haActive = 1 // single master: always active
 	}
 
 	// Initialize accounting logger
@@ -1109,6 +1123,12 @@ func (s *Server) handleRunJob(conn net.Conn, r *dis.Reader, hdr *dis.RequestHead
 	if err != nil {
 		dis.SendErrorReply(conn, dis.PbseBadReq, 0)
 		return false
+	}
+	// HA: only the active (lease-holding) server may dispatch jobs.
+	if s.haEnabled && !s.isActive() {
+		log.Printf("[SERVER] RunJob %s rejected: standby (not HA leader)", jobID)
+		dis.SendErrorReply(conn, dis.PbseBadReq, 0)
+		return true
 	}
 
 	// Extension is read by the main connection loop (handleConnection)
@@ -3348,6 +3368,13 @@ func (s *Server) startBackgroundTasks() {
 		}
 	}()
 
+	// Multi-master HA (TODO 5.1): when PBS_HA is set, participate in the
+	// PostgreSQL lease election; only the active holder notifies its scheduler
+	// and accepts job dispatch.
+	if s.haEnabled {
+		go s.haLeaderLoop()
+	}
+
 	if s.cfg.SchedTriggerPort > 0 {
 		if s.externalSchedReachable() {
 			log.Printf("[SERVER] External scheduler (pbs_sched) detected on 127.0.0.1:%d", s.cfg.SchedTriggerPort)
@@ -3374,6 +3401,9 @@ func (s *Server) startBackgroundTasks() {
 // scheduler so a job is dispatched promptly without waiting for the polling
 // ticker; pbs_sched performs the placement.
 func (s *Server) triggerSched() {
+	if s.haEnabled && !s.isActive() {
+		return // standby: do not wake the (local) scheduler
+	}
 	if s.cfg.EventDriven && s.cfg.SchedTriggerPort > 0 {
 		s.notifyExternalSched()
 	}
@@ -3423,6 +3453,48 @@ func (s *Server) schedulerWatchLoop() {
 					s.lastSchedWarn = now
 					log.Printf("[SERVER] WARNING: external scheduler (pbs_sched) is NOT running on 127.0.0.1:%d; jobs will NOT be scheduled until it is started", s.cfg.SchedTriggerPort)
 				}
+			}
+		}
+	}
+}
+
+// isActive reports whether this server is the active (HA leader / single
+// master) instance and should notify its scheduler and dispatch jobs.
+func (s *Server) isActive() bool { return atomic.LoadInt32(&s.haActive) == 1 }
+
+// haLeaderLoop runs the multi-master HA leader election against the shared
+// PostgreSQL store (TODO 5.1). Every few seconds it tries to acquire (renew) the
+// lease; the holder is active, the others stand by. When a standby acquires the
+// lease (the previous active died and its lease expired), it marks itself active
+// and runs the running-job reconciliation so live jobs continue without being
+// re-dispatched.
+func (s *Server) haLeaderLoop() {
+	ps, ok := s.store.(*PostgresStore)
+	if !ok {
+		// Cannot elect on a non-shared store: act as the sole master.
+		atomic.StoreInt32(&s.haActive, 1)
+		return
+	}
+	ttl := 10 * time.Second
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+			acquired, err := ps.TryAcquireLease(s.haHolder, ttl)
+			if err != nil {
+				log.Printf("[SERVER] HA lease error: %v", err)
+				continue
+			}
+			if acquired {
+				if atomic.CompareAndSwapInt32(&s.haActive, 0, 1) {
+					log.Printf("[SERVER] Acquired HA leader lease; taking over as active")
+					s.reconcileRunningJobsWithMOMs()
+				}
+			} else if atomic.CompareAndSwapInt32(&s.haActive, 1, 0) {
+				log.Printf("[SERVER] Lost HA leader lease; standing by")
 			}
 		}
 	}
