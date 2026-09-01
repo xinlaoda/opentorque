@@ -22,6 +22,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   new active master after failover. Live-verified on Azure: A bound the VIP,
   released it on graceful shutdown, then B (post-takeover) re-bound it.
 
+- **Dual-machine HA end-to-end (TODO 5.1), Azure-native topology.** Validated on
+  two master VMs behind an **Azure Internal Load Balancer** sharing an **Azure
+  Database for PostgreSQL (managed)**. Active master is leader-elected via the
+  PG lease and opens an active-only health port that the LB probes, so the LB
+  forwards `15001` only to the active. A job submitted via the LB ran on a
+  cross-host MOM (C, exit 0). Stopping the active's server: the standby
+  acquired the lease (`Acquired HA leader lease; taking over as active`),
+  bound the health port, the surviving MOM re-registered through the LB, a
+  post-failover job ran (C, exit 0), and the pre-failover completed job was
+  recovered from the shared managed PG. (Caveat: Azure LB does not service
+  self/hairpin connections, so a client/MOM colocated on the active host cannot
+  reach the LB - separate compute MOMs or a floating-IP enablement are the
+  production answers.)
+
 - **Multi-master HA leader election (TODO 5.1).** With `PBS_HA=1`, `pbs_server`
   instances share the PostgreSQL store and elect a leader via an `ot_lease`
   row (10s TTL, 3s renewal). The active holder dispatches jobs and wakes the

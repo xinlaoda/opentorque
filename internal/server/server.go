@@ -121,7 +121,13 @@ func New(cfg *Config) (*Server, error) {
 		done:     make(chan struct{}),
 	}
 
-	s.haHolder = fmt.Sprintf("%s:%d", icfg.ServerName, icfg.Port) // unique per instance
+	// Lease holder identity must be unique per instance even though HA masters
+	// share the same server_name. Use the OS hostname + port, not ServerName.
+	if hn, err := os.Hostname(); err == nil {
+		s.haHolder = strings.Split(hn, ".")[0] + ":" + strconv.Itoa(icfg.Port)
+	} else {
+		s.haHolder = icfg.ServerName + ":" + strconv.Itoa(icfg.Port)
+	}
 	if v := os.Getenv("PBS_HA_VIP"); v != "" {
 		s.haVIP = v
 		s.haVIPDev = os.Getenv("PBS_HA_VIP_DEV")
