@@ -52,7 +52,13 @@ type Server struct {
 	// clients and MOMs connect to the VIP, which always points at the active host
 	haVIP    string
 	haVIPDev string
-	listener net.Listener
+
+	// Active health-listener port (e.g. for an external LB TCP probe). Only the
+	// active master binds it, so a load balancer forwards the server port to
+	// the active and flips on takeover.
+	haHP         int
+	haHPListener net.Listener
+	listener     net.Listener
 
 	// Server state
 	mu        sync.RWMutex
@@ -121,6 +127,11 @@ func New(cfg *Config) (*Server, error) {
 		s.haVIPDev = os.Getenv("PBS_HA_VIP_DEV")
 		if s.haVIPDev == "" {
 			s.haVIPDev = "eth0"
+		}
+	}
+	if p := os.Getenv("PBS_HA_HEALTH_PORT"); p != "" {
+		if n, err := strconv.Atoi(p); err == nil {
+			s.haHP = n
 		}
 	}
 	if os.Getenv("PBS_HA") != "" {
@@ -3499,6 +3510,7 @@ func (s *Server) haLeaderLoop() {
 			if atomic.LoadInt32(&s.haActive) == 1 {
 				s.haReleaseVIP()
 			}
+			s.haStopHealth()
 			return
 		case <-ticker.C:
 			acquired, err := ps.TryAcquireLease(s.haHolder, ttl)
@@ -3511,13 +3523,51 @@ func (s *Server) haLeaderLoop() {
 					log.Printf("[SERVER] Acquired HA leader lease; taking over as active")
 					s.reconcileRunningJobsWithMOMs()
 					s.haBindVIP()
+					s.haStartHealth()
 				}
 			} else if atomic.CompareAndSwapInt32(&s.haActive, 1, 0) {
 				log.Printf("[SERVER] Lost HA leader lease; standing by")
 				s.haReleaseVIP()
+				s.haStopHealth()
 			}
 		}
 	}
+}
+
+// haStartHealth opens the active-only health listener used by an external load
+// balancer TCP probe. The LB forwards the server port to the active master and
+// flips to the standby once the active (and its health listener) goes away.
+func (s *Server) haStartHealth() {
+	if s.haHP <= 0 || s.haHPListener != nil {
+		return
+	}
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", s.haHP))
+	if err != nil {
+		log.Printf("[SERVER] HA health listener on :%d failed: %v", s.haHP, err)
+		return
+	}
+	s.haHPListener = ln
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	log.Printf("[SERVER] HA health listener active on :%d", s.haHP)
+}
+
+// haStopHealth closes the active-only health listener when this instance is no
+// longer active (or is shutting down), so the LB stops forwarding to it.
+func (s *Server) haStopHealth() {
+	if s.haHPListener == nil {
+		return
+	}
+	s.haHPListener.Close()
+	s.haHPListener = nil
+	log.Printf("[SERVER] HA health listener stopped")
 }
 
 // haBindVIP attaches the floating VIP to this host's interface. It is called
