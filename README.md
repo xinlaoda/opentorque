@@ -23,6 +23,10 @@ OpenTorque is a clean-room reimplementation of the [TORQUE Resource Manager](htt
 - **Token-based authentication**: HMAC-SHA256, no separate auth daemon needed
 - **Cross-platform**: compiles natively for Linux (amd64/arm64), macOS, and Windows
 - **Cloud bursting**: elastic cloud pool — local nodes first, burst to cloud VMs only when local capacity is exhausted, auto scale-in
+- **High availability (cloud-native)**: dual active/standby masters sharing a
+  managed PostgreSQL, leader-elected via a lease, behind an Azure load balancer
+  that follows the active (transparent job/MOM failover with running-job
+  continuation). See [docs/opentorque-ha.md](docs/opentorque-ha.md).
 - **Node selection**: `-l host=<node>` pinning, `-l feature=a,b` properties, and
   named host groups / node pools (`-l host=@group`)
 - **Multi-node placement**: `-l nodes=N:ppn=M` / `-l select=` allocates N distinct
@@ -317,6 +321,7 @@ opentorque/
 - [Resource Constraints (GPU/license + backfill)](docs/resource-constraints.md)
 - [Job & Data Persistence](docs/job-persistence.md)
 - [Cloud Bursting](docs/cloud-bursting.md)
+- [High Availability (cloud-native)](docs/opentorque-ha.md)
 - [Cloud Elastic — Event-Driven Design](docs/cloud-elastic-event-driven-design.md)
 - [Cloud Elastic — Node Scaling Design](docs/cloud-elastic-node-scaling-design.md)
 - [Run as systemd services](configs/systemd/)
