@@ -77,6 +77,24 @@ Networking:
   `15150` from `AzureLoadBalancer`, and the MOM service port from the compute
   subnet — with **higher precedence than any deny-Internet rule**.
 
+## Switchover time (measured)
+
+With the topology above (two masters behind the LB, shared managed PG), stopping
+the active `pbs_server` gave an end-to-end, client-visible outage through the
+LB frontend of **≈ 39 s** (probed continuously from a third compute host):
+
+| phase | time |
+|---|---|
+| LB drops the stopped active (probe fails) | ~0.1 s |
+| lease expiry (10 s TTL, standby stops renewing) | ~10 s |
+| standby lease-renewal loop acquires + opens health port | ~ +3 s |
+| Azure LB health probe re-marks the new active healthy | ~ +26 s |
+| **total client-visible switchover** | **≈ 39 s** |
+
+The LB probe bracket is the dominant, tunable part: lower the probe `intervalInSeconds` (default 5) and `numberOfProbes` (default 2) to shrink it to a few seconds. The lease-expiry floor is bounded by `PBS_HA` lease TTL (10 s). After switchover, jobs submitted through the frontend run normally on
+dedicated compute MOMs, and queued/running state carries over from the shared
+PostgreSQL.
+
 ## Failover drill
 
 1. Client/MOM connects to `frontend:15001`.
