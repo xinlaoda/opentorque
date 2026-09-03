@@ -79,28 +79,55 @@ Networking:
 
 ## Switchover time (measured)
 
-With the topology above (two masters behind the LB, shared managed PG), stopping
-the active `pbs_server` gave an end-to-end, client-visible outage through the
-LB frontend of **≈ 39 s** (probed continuously from a third compute host):
+With two masters behind the LB and a shared managed PG, stopping the active
+`pbs_server` gave a client-visible outage through the LB frontend of:
 
 | phase | time |
 |---|---|
 | LB drops the stopped active (probe fails) | ~0.1 s |
 | lease expiry (10 s TTL, standby stops renewing) | ~10 s |
 | standby lease-renewal loop acquires + opens health port | ~ +3 s |
-| Azure LB health probe re-marks the new active healthy | ~ +26 s |
+| Azure LB health probe re-marks the new active healthy | ~ +26 s (default 15 s probe) |
 | **total client-visible switchover** | **≈ 39 s** |
 
-**Tuning.** The LB probe bracket dominated; with the probe set to its Azure
-minimum (`intervalInSeconds=5`, probe-threshold small) the same drill measured
-**≈ 20 s** client-visible switchover. The remaining floor is the `PBS_HA` lease
-TTL (10 s); lower it (e.g. 5 s) to shave further if aggressive failover is
-preferred. (Azure LB minimum probe interval is 5 s; it cannot go lower.)
-The LB probe bracket is the dominant, tunable part: lower the probe `intervalInSeconds` (default 5) and `numberOfProbes` (default 2) to shrink it to a few seconds. The lease-expiry floor is bounded by `PBS_HA` lease TTL (10 s). After switchover, jobs submitted through the frontend run normally on
-dedicated compute MOMs, and queued/running state carries over from the shared
-PostgreSQL.
+**Tuning.** The LB probe bracket dominated. Set the probe to its Azure minimum
+(`intervalInSeconds=5`) and re-measured **≈ 20 s**. The remaining floor is the
+`PBS_HA` lease TTL (10 s), the LB probe cannot go below 5 s on Azure.
 
-Use `scripts/ha-failover-drill.sh <lb:port> <active-ssh...>` to run this
+Use `scripts/ha-failover-drill.sh <lb:port> <active-ssh...>` to re-run and
+measure this automatically.
+
+## Single-master VM replacement (no standby)
+
+You can run only **one** master VM: state lives in the managed PostgreSQL and
+the LB follows the active via the health port, so when that VM dies you can
+stand up a new master VM and it recovers the same state - no per-master config
+on clients/MOMs.
+
+**Measured** (same VM, software pre-installed, `az vm deallocate` + `az vm
+start`): the LB frontend went client-visible down/up over **≈ 86 s**, i.e.
+**≈ 1.5 min** for the fastest restart path. A brand-new VM takes longer,
+dominated by provisioning/bootstrapping:
+
+| replacement path | client-visible RTO (approx) |
+|---|---|
+| reboot / restart the same VM (software installed) | ≈ 60-90 s |
+| new VM from a **pre-baked master image** | ≈ 2-4 min |
+| new VM, software installed via script / cloud-init | ≈ 5-8 min |
+| two-master hot standby (for comparison) | ≈ 20 s |
+
+**Requirements for a clean single-master restart:**
+- All **control-plane daemons must be systemd-managed** (`pbs_server` **and**
+  `pbs_sched`, with `pbs_mom` on compute nodes). On reboot, only `pbs_server`
+  auto-starting leaves jobs queued - `pbs_sched` must start too. See
+  `configs/systemd/`.
+- The new VM must carry the shared config: a 32-byte `auth_key`, a consistent
+  `server_name`, and LB-backend membership. Queue/nodes/inventory come back from
+  PostgreSQL automatically.
+- Fastest cost-effective automation: a **single-instance VMSS / custom image**
+  so Azure auto-replaces the master (~2-4 min RTO at one-master cost).
+
+## Failover drill
 
 1. Client/MOM connects to `frontend:15001`.
 2. Stop the active `pbs_server` (or the VM): `sudo systemctl stop pbs_server`.
