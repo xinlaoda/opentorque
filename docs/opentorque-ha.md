@@ -91,11 +91,16 @@ LB frontend of **≈ 39 s** (probed continuously from a third compute host):
 | Azure LB health probe re-marks the new active healthy | ~ +26 s |
 | **total client-visible switchover** | **≈ 39 s** |
 
+**Tuning.** The LB probe bracket dominated; with the probe set to its Azure
+minimum (`intervalInSeconds=5`, probe-threshold small) the same drill measured
+**≈ 20 s** client-visible switchover. The remaining floor is the `PBS_HA` lease
+TTL (10 s); lower it (e.g. 5 s) to shave further if aggressive failover is
+preferred. (Azure LB minimum probe interval is 5 s; it cannot go lower.)
 The LB probe bracket is the dominant, tunable part: lower the probe `intervalInSeconds` (default 5) and `numberOfProbes` (default 2) to shrink it to a few seconds. The lease-expiry floor is bounded by `PBS_HA` lease TTL (10 s). After switchover, jobs submitted through the frontend run normally on
 dedicated compute MOMs, and queued/running state carries over from the shared
 PostgreSQL.
 
-## Failover drill
+Use `scripts/ha-failover-drill.sh <lb:port> <active-ssh...>` to run this
 
 1. Client/MOM connects to `frontend:15001`.
 2. Stop the active `pbs_server` (or the VM): `sudo systemctl stop pbs_server`.
