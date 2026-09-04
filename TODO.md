@@ -177,13 +177,27 @@ scheduling paths:
   while two `-l ncpus=1` jobs ran **R**; node status showed `used_cpus = 2` on
   the full node. Previously every job ran immediately regardless of `-l ncpus`.
 
-### 2.7 Fair-share accounts / projects / QoS  [GAP]
-Only a minimal per-user `fairUsage` map exists. No accounts, projects, or QoS
-tiers with per-group fair-share or limits.
+### 2.7 Accounts / projects / QoS - narrowed to cloud finops (classic fair-share de-scoped)  [GAP - lightweight cloud-native scope]
+OpenTorque targets elastic cloud, so the classic hierarchical fair-share math (share of a
+fixed machine, decayed usage) and preemptive QoS are **de-scoped** - capacity scales out instead.
+What is still valuable (and more so than on-prem, where nobody pays marginal compute) is cost-
+**governance / chargeback**:
+- `-A account` / `-A project` cost tag on each job, surfaced in usage/accounting.
+- Per-project **concurrent-running cap** (max simultaneous vCPUs and/or running jobs) as job-level admission.
+- Per-project usage / cost report (VM-hour attribution to teams).
+- QoS expressed via platform tiers - a project jobs are routed to the on-demand vs **spot** vs reserved
+  node pool (TODO 1.3 host groups), rather than by suspending/requeueing other jobs. Placeholder
+  until implemented; see docs/cloud-elastic-event-driven-design.md for the elastic pool model.
 
-### 2.8 `subscription`/multi-tenancy & quotas  [GAP]
-No per-user/group quota or account-based enforcement beyond basic
-`max_user_jobs`/`max_user_run` (see `enforceSubmitLimits` / `enforceRunLimits`).
+### 2.8 Multi-tenancy & quotas - layered on platform quota (cloud-native)  [GAP - lightweight scope]
+Do NOT reimplement hard resource limits - the **platform already enforces them** (Azure subscription
+vCPU quota per series, VMSS capacity, budgets, Management Groups, VNet/private-endpoint isolation).
+OpenTorque adds only the **job-scheduler-level view**:
+- Per-tenant / per-account **soft quota** (max concurrent vCPUs / running jobs), mapped onto the platform cap.
+- Placement isolation: route each tenant/project to a **dedicated queue + node group / VMSS pool** so one
+  project cannot crowd another (elastic isolation replaces fair-share arbitration).
+- Admission uses the existing `enforceSubmitLimits` / `enforceRunLimits` seam, extended to account/tenant
+  granularity. Placeholder until implemented.
 ### 2.9 Poll-only / no event-driven scheduling trigger  [DONE — implemented & tested]
 RESOLVED (avoid regression): both schedulers used to run on a fixed timer only
 (default 10s, floor 5s) with **no** server->scheduler notification, so end-to-end
