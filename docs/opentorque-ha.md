@@ -217,7 +217,15 @@ az vmss create -g "$RG" -n otx-vmss --image <sig-version-id> --vm-sku Standard_D
   --load-balancer <lb> --backend-pool-name <pool> --public-ip-address ""
 ```
 
-`scripts/ha-single-master-vmss.sh` captures this end-to-end. **Important:** a
+`scripts/ha-single-master-vmss.sh` captures this end-to-end. Verified live:
+a generalized non-TrustedLaunch image was created and a one-instance Uniform VMSS
+from it joined the LB backend pool. **Important finding:** a freshly-booted master
+must reach the managed PostgreSQL within the store connect timeout, or it falls
+back to the file store and does not enter HA (health port not opened -> LB does
+not serve it). Bake a PG-wait / connect-retry into `pbs_server`'s `ExecStartPre`
+(or give `NewPostgresStore` a retried schema-ensure) so an auto-replaced master
+always joins the cluster.
+ **Important:** a
 SPECIALIZED image cannot be used with `az vmss create` (Azure rejects "OSProfile
 is not allowed with a specialized image"). The working VMSS route is a
 **generalized** image from a disposable golden VM (`waagent -deprovision+user`

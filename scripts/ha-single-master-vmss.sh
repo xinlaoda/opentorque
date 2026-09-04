@@ -55,6 +55,16 @@ az vmss create -g "$RG" -n "$VMSS" --image "$IMG" --vm-sku Standard_D2s_v3 \
    --load-balancer "$LB" --backend-pool-name "$LBPOOL" \
    --public-ip-address "" -l "$LOC" -o none
 
+# IMPORTANT (observed live): a freshly-booted master that cannot reach the managed
+# PostgreSQL within NewPostgresStore's connect timeout falls back to the FILE
+# store and does NOT enter HA (no health port -> LB won't serve it). So the image
+# must guarantee the DB is reachable before pbs_server starts. Options baked into
+# the image:
+#   - add an ExecStartPre in pbs_server.service that waits for the PG DNS/TCP
+#     (e.g. retry loop / resolve-check) before starting, or
+#   - give NewPostgresStore a longer/retried ensure-schema.
+# Without this, an auto-replaced master may come up but not join the cluster.
+
 # 3) Auto-replace test: delete the instance -> VMSS recreates from the image.
 #    az vmss delete-instances --instance-ids 0
 #    Then poll the LB frontend (scripts/ha-failover-drill.sh); expected total
