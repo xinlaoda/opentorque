@@ -241,10 +241,11 @@ Two modes:
 All masters run daemons under **systemd** (so a reboot self-heals the full
 control plane) and share a 32-byte `auth_key` and `server_name`.
 
-See [docs/opentorque-ha.md](docs/opentorque-ha.md) for deployment, scripts
-(`scripts/ha-deploy.sh`, `scripts/ha-failover-drill.sh`,
-`scripts/ha-single-master-vmss.sh`), settings, cost, LB/PostgreSQL sizing and
-best practices.
+See [docs/opentorque-ha.md](docs/opentorque-ha.md) for deployment, settings, cost,
+LB/PostgreSQL sizing and best practices. Ops scripts under `scripts/`:
+`ha-deploy.sh` (provision), `ha-failover-drill.sh` (switchover measurement),
+`ha-status.sh` + `ha-ops.sh` (status / ops front-end), and
+`ha-single-master-vmss.sh` (single-master auto-replace image/VMSS).
 
 
 ## Cloud Bursting (Elastic Cloud Pool)

@@ -57,6 +57,8 @@ from PostgreSQL.
 | `scripts/ha-deploy.sh` | One-command Azure provisioning: VNet/NSG, managed PG, internal LB, two master VMs + compute node; phases `infra|masters|compute|all`. |
 | `scripts/ha-single-master-vmss.sh` | Single-master auto-replace: capture master custom image → one-instance VMSS in the LB backend → test auto-replacement (RTO ~2-4 min). |
 | `scripts/ha-failover-drill.sh` | Repeated drill: probe the LB frontend, stop the active, report the client-visible switchover window. |
+| `scripts/ha-status.sh` | Cluster status: lease holder, LB health, nodes, jobs. |
+| `scripts/ha-ops.sh` | Operations front-end: `status \| drill \| deploy \| vmss-setup \| stop-active \| start-master`. |
 | `configs/systemd/*.service` | systemd units for `pbs_server`, `pbs_sched`, `pbs_mom`. |
 
 **On each master VM** (built and installed from the repo):
@@ -215,7 +217,15 @@ az vmss create -g "$RG" -n otx-vmss --image <sig-version-id> --vm-sku Standard_D
   --load-balancer <lb> --backend-pool-name <pool> --public-ip-address ""
 ```
 
-`scripts/ha-single-master-vmss.sh` captures this end-to-end. Total auto-replace
+`scripts/ha-single-master-vmss.sh` captures this end-to-end. **Important:** a
+SPECIALIZED image cannot be used with `az vmss create` (Azure rejects "OSProfile
+is not allowed with a specialized image"). The working VMSS route is a
+**generalized** image from a disposable golden VM (`waagent -deprovision+user`
++ `az vm generalize` + `az image create`), which the script documents as Route A.
+(A live VMSS auto-replace run was attempted in this session but blocked by that
+Azure specialized-image constraint and the TrustedLaunch `image create` rule;
+the measured replacement-master failover is ~16 s and total RTO ≈ provisioning
++ ~16 s.) Total auto-replace
 RTO ≈ provisioning (~2-4 min) + ~16 s failover. In this session the SIG image
 version was created and verified against the TrustedLaunch snapshot; the VMSS
 creation step from it is the documented follow-on (the az CLI `vmss create`

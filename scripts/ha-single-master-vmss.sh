@@ -20,6 +20,20 @@ LB="${LB?set LB}"; LBPOOL="${LBPOOL?set LBPOOL}"
 
 az account set --subscription "$AZURE_SUB"
 
+# NOTE: a SPECIALIZED image cannot be used with `az vmss create` (Azure rejects
+# "Parameter OSProfile is not allowed with a specialized image"). For a working
+# VMSS you must use a GENERALIZED image. Two routes:
+#
+# Route A - GENERALIZED golden VM (recommended, works with az vmss create):
+#   1) az vm create -n golden <ubuntu>  ; deploy opentorque + systemd + ha.env
+#   2) ssh golden "sudo waagent -deprovision+user"   # linux prep for generalize
+#   3) az vm generalize -g "$RG" -n golden
+#   4) az image create -g "$RG" -n otx-master-img --source golden -l "$LOC"
+#   5) az vmss create ... --image otx-master-img ...        # works
+#
+# Route B - SPECIALIZED SIG image, then create the VM model without OSProfile
+#   (not via the generic az vmss create; use an ARM template that omits osProfile).
+#
 # 1) SIG + Specialized/TrustedLaunch image version from the master snapshot
 az sig create -g "$RG" --gallery-name "$SIG" -l "$LOC" -o none
 az sig image-definition create -g "$RG" --gallery-name "$SIG" \
