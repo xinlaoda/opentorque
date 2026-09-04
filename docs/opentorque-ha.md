@@ -181,6 +181,95 @@ VM compute (not included above): each D2s_v3 approx $50-60/mo.
   repeatedly hit `context deadline exceeded` connecting to the managed PG
   (observed live).
 
+## Production network topology (recommended)
+
+In production, keep **all control-plane and storage traffic on the private
+network** and only expose a hardened public edge where real internet clients
+exist. This is the common cloud best practice and removes the need for the
+NAT gateway (which is only a quick-validation stand-in).
+
+```
+  enterprise clients (on-prem)      remote / internet clients
+        |  ExpressRoute / VPN               |  public edge
+        |  (VNet is extended)               v
+        |                            Front Door / public LB (WAF + TLS)
+        v                                     |
+   +------------------------------------------v--------------------------+
+   |                      Azure VNet (private)                          |
+   |   Internal LB (VIP, private frontend 10.0.0.10:15001)  <-- clients / MOMs
+   |        |                       |                                   |
+   |   master A (active)      master B (standby)   VMSS (single-master) |
+   |        \                      /                                     |
+   |          \ Private Link      /  (private endpoint + DNS zone)       |
+   |            \                /                                       |
+   |        Azure PostgreSQL (private endpoint, no public endpoint)      |
+   +------------------------------------------------------------------------+
+```
+
+| traffic | recommended |
+|---|---|
+| enterprise client -> LB | ExpressRoute / Site-to-Site VPN extends the VNet; clients reach the **Internal LB private frontend** directly (effectively intranet) |
+| remote/external client -> LB | public edge: **Front Door / public Standard LB / App Gateway**, TLS termination + WAF, then forward to the backends |
+| master -> PostgreSQL | **Azure Private Link (private endpoint)** - all in-VNet, no public endpoint, **no NAT needed** |
+| master -> compute MOM | VNet private network (same subnet/peering) |
+
+### Why Private Link instead of NAT (production)
+
+- **NAT** gives a private VMSS instance outbound internet to reach the
+  managed PG's *public* endpoint + firewall. It works for validation but keeps
+  the DB publicly reachable and routes DB traffic through the internet edge.
+- **Private Link** exposes the managed PG only through a **private endpoint**
+  in your VNet with a **private DNS zone**, so master VMs (including private
+  VMSS instances with **no public IP at all**) reach it over the private
+  network. Traffic never leaves Azure, and there is nothing public to lock
+  down - no firewall rules, no NAT, no egress hops.
+
+### Private Endpoint + private DNS zone example (managed PostgreSQL Flexible)
+
+```bash
+RG="..."; LOC="westus3"; VNET="..."; SUBNET="pe-subnet"   # dedicated subnet for endpoints
+PG="otx-pg"; PGID=$(az postgres flexible-server show -g "$RG" -n "$PG" --query id -o tsv)
+
+# 1) Private endpoint on a dedicated subnet
+az network private-endpoint create -g "$RG" -n "${PG}-pe" -l "$LOC" \
+  --connection-name "${PG}-conn" \
+  --private-connection-resource-id "$PGID" \
+  --group-id postgresqlServer \
+  --vnet-name "$VNET" --subnet "$SUBNET"
+PEIP=$(az network private-endpoint show -g "$RG" -n "${PG}-pe" \
+       --query 'privateIpConfigurations[0].privateIpAddress' -o tsv)
+
+# 2) Private DNS zone + link, so the server FQDN resolves inside the VNet
+az network private-dns zone create -g "$RG" -n "privatelink.postgres.database.azure.com"
+az network private-dns link vnet create -g "$RG" -n "${PG}-dnslink" \
+  --zone-name "privatelink.postgres.database.azure.com" --virtual-network "$VNET" \
+  --registration-enabled false
+az network private-endpoint dns-zone-group create -g "$RG" -n "${PG}-dzg" \
+  --endpoint-name "${PG}-pe" --private-dns-zone "privatelink.postgres.database.azure.com" \
+  --zone-name "postgresqlServer.privatelink.postgres.database.azure.com"
+
+# 3) masters keep the same PBS_PG_DSN (FQDN); it now resolves to the private IP
+#    PBS_PG_DSN=postgres://pbs:...@otx-pg.postgres.database.azure.com:5432/pbs?sslmode=require
+```
+
+Afterward, remove the PG public access/firewall and the subnet NAT gateway - the
+DB is reachable only from the VNet. The masters' `PBS_PG_DSN` is unchanged
+(the FQDN maps to the private endpoint).
+
+### Public edge for remote clients (optional)
+
+If you have clients outside the corporate network that must submit jobs, put a
+**Front Door / App Gateway / public Standard LB** in front with TLS termination
+and WAF, restricted to the LB:15001 forwarding rule. Do not expose the master
+`15001` port directly to the internet. (Access via ExpressRoute/VPN means the
+public edge is unnecessary.)
+
+### Takeaway
+
+**Production = Internal LB + managed PG behind Private Link + ExpressRoute/VPN
+for enterprise clients.** The NAT gateway and public-PG route documented here
+are for fast end-to-end validation; they are not the production posture.
+
 ## Best practices
 
 1. **Separate compute MOMs from masters** (masters = control plane only). This
@@ -246,3 +335,4 @@ and serves jobs.
 `1788561546.486` = **~45 s RTO**. The failover (lease + health-port + LB flip)
 alone remains ~16 s once the new master is up; the rest is Azure provisioning
 the replacement VM.
+

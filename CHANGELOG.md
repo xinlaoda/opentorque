@@ -20,6 +20,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   at 1788561546.486), including the ~16 s failover (lease + health-port + LB flip).
   TrustedLaunch `az image create` is rejected, so the route is a generalized golden
   VM (waagent deprovision + generalize + image create).
+  Production topology documented: **Internal LB + managed PG behind Azure Private
+  Link (private endpoint + private DNS zone) + ExpressRoute/VPN for enterprise
+  clients**, with a hardened public edge (Front Door / WAF) only for external clients.
 
 ### Changed
 - **HA crash-recovery reconciliation (TODO 5.1 Phase 0).** On server start
