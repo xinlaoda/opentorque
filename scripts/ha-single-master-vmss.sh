@@ -19,9 +19,18 @@ LB="${LB?set LB}"; LBPOOL="${LBPOOL?set LBPOOL}"; LBHEALTH="${LBHEALTH:-15150}"
 
 az account set --subscription "$AZURE_SUB"
 
-# 1) Capture a custom image of the deployed master (from its OS disk).
-#    az image create copies the disk; it does NOT generalize, so the VM is untouched.
-az image create -g "$RG" -n "$IMAGE" -l "$LOC" --source "$SRC" -o none
+# If the source VM uses TrustedLaunch (common on recent Azure images), the old
+# `az image create` route is not allowed. Use a Shared Image Gallery with a
+# Specialized image (no generalize needed) and MATCH the security type:
+#   az sig create -g "$RG" --gallery-name otxSig -l "$LOC"
+#   az sig image-definition create -g "$RG" --gallery-name otxSig \
+#       --gallery-image-definition otxImgDef --publisher otx --offer otx --sku otx \
+#       --os-type Linux --os-state Specialized --security-type TrustedLaunch
+#   az sig image-version create -g "$RG" --gallery-name otxSig \
+#       --gallery-image-definition otxImgDef --gallery-image-version 1.0.0 \
+#       --target-regions "$LOC" --replica-count 1 --os-snapshot <snapshot-id>
+# (For non-TrustedLaunch VMs the simpler managed-image route below works:)
+# 1) az image create -g "$RG" -n "$IMAGE" -l "$LOC" --source "$SRC"
 
 # 2) Create a one-instance VMSS from the image, on the LB subnet.
 #    (systemd units + ha.env are baked in by the build, so boot = ready master.)
