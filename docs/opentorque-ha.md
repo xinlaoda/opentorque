@@ -1,152 +1,186 @@
 # OpenTorque High Availability (cloud-native)
 
-OpenTorque HA is designed for **cloud deployments** (Azure-first) and leans on
-managed platform services wherever possible. Local/on-prem HPC clusters already
-have mature schedulers; this project focuses on the cloud, where a resource
-manager is expected to burst, scale, and survive node loss with managed
-infrastructure.
+OpenTorque HA is built for **cloud deployments (Azure-first)** and leans on
+managed platform services. Local/on-prem clusters already have mature
+schedulers; this project's differentiator is the cloud: managed storage, an
+internal load balancer as the VIP, and transparent failover.
 
-## Architecture (Azure)
+There are **two supported modes**:
+- **Dual-master (hot standby)** — recommended; two control-plane VMs, ~20 s
+  failover.
+- **Single-master (auto-replace)** — cheaper; one control-plane VM, minutes
+  failover via VMSS/custom image.
+
+Both share the same state model: the authoritative cluster state lives in
+**managed PostgreSQL**, and an **internal load balancer** is the stable address
+clients/MOMs use, following the active master via an active-only health port.
+
+## Architecture
 
 ```
-                        clients / compute MOMs
-                                 │  (connect to 10.0.0.10:15001)
-                                 ▼
-               ┌──────────────────────────────────┐
-               │  Azure Internal Load Balancer    │  = the VIP / stable address
-               │  frontend 10.0.0.10 · rule 15001 │
-               │  probe Tcp :15150 (active-only)  │
-               └───────┬───────────────┬──────────┘
-                       ▼               ▼
-                ┌─────────────┐  ┌─────────────┐
-                │  master A   │  │  master B   │   two pbs_server (+pbs_sched)
-                │ (VM1,10.0.0.4)│ │ (VM2,10.0.0.5)│
-                └──────┬──────┘  └──────┬──────┘
-                       │  PBS_PG_DSN     │   (leader lease + all state)
-                       └───────┬─────────┘
-                               ▼
-                ┌──────────────────────────────┐
-                │ Azure Database for PostgreSQL │  managed, shared store
-                └──────────────────────────────┘
+         clients / compute MOMs
+              │  connect to <frontend>:15001
+              ▼
+     ┌───────────────────────────────┐
+     │ Azure internal Load Balancer  │  = the VIP / stable address
+     │ frontend 10.0.0.10 · 15001    │
+     │ probe Tcp:15150 (active-only) │
+     └───────┬───────────────┬───────┘
+             ▼               ▼
+      master A (VM1)     master B (VM2)     (dual)  OR  one master (single,
+      pbs_server+           pbs_server+            replaced by VMSS/custom image)
+      pbs_sched (systemd)    pbs_sched (systemd)
+             └────────┬──────┘
+                      ▼
+      Azure Database for PostgreSQL (managed)  ← lease election + ALL state
 ```
 
-Two masters share one **managed PostgreSQL** as the authoritative store. A
-**leader lease** (an `ot_lease` row, 10s TTL, 3s renewal) elects exactly one
-active master. Only the active binds a **health port** (default 15150) that the
-**load balancer** probes, so the LB forwards `15001` only to the active. On
-failover the standby acquires the lease, opens the health port, and the LB
-flips to it — clients and MOMs at the LB frontend follow transparently.
+## How a leader is chosen (both modes)
 
-## Key behaviors
+`pbs_server` with `PBS_HA=1` participates in a **lease election** against the
+shared PostgreSQL: an `ot_lease` row (10 s TTL, 3 s renewal) elects exactly one
+**active** master. Only the active:
 
-- **Single active**: only the lease holder notifies its scheduler and accepts
-  `RunJob`; standbys stay idle (no split brain, no double dispatch).
-- **State continuity**: jobs/queues/nodes live in PostgreSQL, so the standby
-  recovers the same state on takeover.
-- **Running jobs continue**: on takeover the new active runs the startup MOM
-  reconciliation — a running job is never re-dispatched if a MOM confirms it is
-  still executing (see TODO 5.1), and orphans are re-queued.
-- **Address failover** = the load balancer (managed VIP) + the active-only
-  health port. (A floating secondary IP is not used: Azure does not allow the LB
-  frontend IP to also be a NIC ip-config.)
+- binds the LB **health port** (`PBS_HA_HEALTH_PORT`, default 15150) so the LB
+  forwards `15001` only to it, and
+- accepts `RunJob` / wakes its scheduler (`triggerSched`), while standbys stay
+  idle (no double dispatch / no split brain).
 
-## Configuration (per master, environment)
+On takeover the new active runs the running-job reconciliation (a still-running
+job is never re-dispatched; orphans are queued) and recovers jobs/queues/nodes
+from PostgreSQL.
+
+## Deployment (scripts)
+
+| File | Purpose |
+|---|---|
+| `scripts/ha-deploy.sh` | One-command Azure provisioning: VNet/NSG, managed PG, internal LB, two master VMs + compute node; phases `infra|masters|compute|all`. |
+| `scripts/ha-single-master-vmss.sh` | Single-master auto-replace: capture master custom image → one-instance VMSS in the LB backend → test auto-replacement (RTO ~2-4 min). |
+| `scripts/ha-failover-drill.sh` | Repeated drill: probe the LB frontend, stop the active, report the client-visible switchover window. |
+| `configs/systemd/*.service` | systemd units for `pbs_server`, `pbs_sched`, `pbs_mom`. |
+
+**On each master VM** (built and installed from the repo):
+1. `$PBS_HOME=...` PBS layout; write a shared 32-byte hex `auth_key` and a
+   consistent `server_name`.
+2. Install `configs/systemd/pbs_server.service` + `pbs_sched.service`
+   (`EnvironmentFile=/etc/opentorque/ha.env`), create `/etc/opentorque/ha.env`
+   with the HA settings, `systemctl enable --now pbs_server pbs_sched`.
+3. Compute MOM(s): install `pbs_mom.service`, `$pbsserver <lb-frontend>`.
+
+**On each compute node** (MOM only): `pbs_mom` under systemd, `$pbsserver
+<lb-frontend>` so it follows the active automatically.
+
+## Settings
 
 | Var | Meaning | Default |
 |---|---|---|
-| `PBS_PG_DSN` | libpq DSN to the shared cluster DB (`…?sslmode=require`) | "" → file store |
+| `PBS_PG_DSN` | libpq DSN to the shared cluster DB | "" (file store) |
 | `PBS_HA` | non-empty ⇒ participate in leader election | "" |
 | `PBS_HA_HEALTH_PORT` | port the ACTIVE opens for the LB probe | 0 (off) |
 | `PBS_HA_VIP` | optional floating CIDR to bind while active | "" |
 | `PBS_HA_VIP_DEV` | interface for the VIP | eth0 |
 
-Both masters must share the same `server_name` **and** the same
-`$PBS_HOME/auth_key` (a 32-byte hex key), so job IDs are stable and any master
-can authenticate clients/MOMs.
+Both masters share the same `server_name` (stable job IDs) and the same 32-byte
+`auth_key`.
 
-## Deploy (systemd, Azure)
+## Pros / cons
 
-`configs/systemd/pbs_server.service` runs `pbs_server -d /var/spool/torque -t
-warm -p 15001`. Inject the env above (e.g. `Environment=PBS_HA=1`,
-`Environment=PBS_PG_DSN=…`, `Environment=PBS_HA_HEALTH_PORT=15150`). Run
-`pbs_sched` and the compute `pbs_mom` on their own hosts.
+### Dual-master (hot standby)
+- **Pros**: near-instant failover (~20 s), no downtime for scheduled burst,
+  a standby is always warm and can absorb a takeover without reprovisioning.
+- **Cons**: +1 master VM (~$50-60/mo), slightly more moving parts (2 systemd
+  control planes sharing the LB backend).
 
-Networking:
-- Add each master NIC to the LB backend pool; probe = `Tcp:15150`.
-- NSG on the master NICs: allow `15001` (server) from `VirtualNetwork`,
-  `15150` from `AzureLoadBalancer`, and the MOM service port from the compute
-  subnet — with **higher precedence than any deny-Internet rule**.
+### Single-master (auto-replace / VMSS)
+- **Pros**: one master VM cost saved; Azure can auto-replace via VMSS+custom
+  image; simplest control plane.
+- **Cons**: **minutes-level RTO** (~90 s reboot of the same VM, ~2-4 min new VM
+  from a pre-baked image, ~5-8 min if software is installed at boot); a cold
+  window with no active master while replacing; requires all daemons to be
+  systemd-managed so the new VM self-heals.
 
-## Switchover time (measured)
+## Measured switchover
 
-With two masters behind the LB and a shared managed PG, stopping the active
-`pbs_server` gave a client-visible outage through the LB frontend of:
-
-| phase | time |
+| scenario | client-visible outage |
 |---|---|
-| LB drops the stopped active (probe fails) | ~0.1 s |
-| lease expiry (10 s TTL, standby stops renewing) | ~10 s |
-| standby lease-renewal loop acquires + opens health port | ~ +3 s |
-| Azure LB health probe re-marks the new active healthy | ~ +26 s (default 15 s probe) |
-| **total client-visible switchover** | **≈ 39 s** |
+| dual-master, LB probe at default 15 s | ≈ 39 s |
+| dual-master, LB probe tuned to 5 s (Azure min) | **≈ 20 s** |
+| single-master, reboot the same VM (software installed) | **≈ 86 s** |
+| single-master, VMSS auto-replace (custom image) | ≈ 2-4 min (provisioning-bound) |
+| single-master, new VM with boot-time script install | ≈ 5-8 min |
 
-**Tuning.** The LB probe bracket dominated. Set the probe to its Azure minimum
-(`intervalInSeconds=5`) and re-measured **≈ 20 s**. The remaining floor is the
-`PBS_HA` lease TTL (10 s), the LB probe cannot go below 5 s on Azure.
+Floor: the 10 s `PBS_HA` lease TTL (both modes) + the LB probe (min 5 s, Azure
+limit). Tune the lease TTL down if you want more aggressive failover.
 
-Use `scripts/ha-failover-drill.sh <lb:port> <active-ssh...>` to re-run and
-measure this automatically.
+## Cost evaluation (westus3, USD/month, approximate - verify pricing page)
 
-## Single-master VM replacement (no standby)
+Shared infra (excludes VM compute):
 
-You can run only **one** master VM: state lives in the managed PostgreSQL and
-the LB follows the active via the health port, so when that VM dies you can
-stand up a new master VM and it recovers the same state - no per-master config
-on clients/MOMs.
-
-**Measured** (same VM, software pre-installed, `az vm deallocate` + `az vm
-start`): the LB frontend went client-visible down/up over **≈ 86 s**, i.e.
-**≈ 1.5 min** for the fastest restart path. A brand-new VM takes longer,
-dominated by provisioning/bootstrapping:
-
-| replacement path | client-visible RTO (approx) |
+| item | monthly (approx) |
 |---|---|
-| reboot / restart the same VM (software installed) | ≈ 60-90 s |
-| new VM from a **pre-baked master image** | ≈ 2-4 min |
-| new VM, software installed via script / cloud-init | ≈ 5-8 min |
-| two-master hot standby (for comparison) | ≈ 20 s |
+| Azure internal Load Balancer (Standard) | $18-25 |
+| Azure internal Load Balancer (Basic, free option) | $0 |
+| Azure Database for PostgreSQL Flexible, B1ms + 32 GiB | $17-22 |
+|   + zone-redundant HA on the PG (DB not a SPOF) | +$14-16 |
 
-**Requirements for a clean single-master restart:**
-- All **control-plane daemons must be systemd-managed** (`pbs_server` **and**
-  `pbs_sched`, with `pbs_mom` on compute nodes). On reboot, only `pbs_server`
-  auto-starting leaves jobs queued - `pbs_sched` must start too. See
-  `configs/systemd/`.
-- The new VM must carry the shared config: a 32-byte `auth_key`, a consistent
-  `server_name`, and LB-backend membership. Queue/nodes/inventory come back from
-  PostgreSQL automatically.
-- Fastest cost-effective automation: a **single-instance VMSS / custom image**
-  so Azure auto-replaces the master (~2-4 min RTO at one-master cost).
+VM compute (not included above): each D2s_v3 ≈ $50-60/mo.
 
-## Failover drill
+| deployment | estimate |
+|---|---|
+| **Dual-master** (2× master + 1 compute + LB + PG) | ≈ $180-210/mo |
+| **Single-master** (1× master + 1 compute + LB + PG) | ≈ $130-155/mo |
+| (add PG zone-redundant HA) | +$14-16/mo |
 
-1. Client/MOM connects to `frontend:15001`.
-2. Stop the active `pbs_server` (or the VM): `sudo systemctl stop pbs_server`.
-3. Lease expires (~10s) → standby acquires → opens `15150` → LB flips.
-4. Verify: `ot_lease.holder` is the standby; standby log shows `Acquired HA
-   leader lease; taking over as active`.
-5. Submit a job via the frontend → new active schedules it on a reachable MOM.
+> The PostgreSQL is the single source of truth; if it must itself be HA (not a
+> SPOF) enable its zone-redundant/HA option (+ ~$14-16/mo). This is separate
+> from the master VMs' HA (which keeps the control plane up).
 
-## Cloud-native guidance (hairpin caveat)
+## Azure service spec requirements
 
-Azure LB does **not** service a client that is colocated on the same host as the
-active master (self/"hairpin" connections). In a cloud deployment this is a
-non-issue, because:
+### Internal Load Balancer
+- **SKU**: Standard (Basic is free but lacks health-probe tuning/features).
+- **Frontend**: a private IP in the master subnet (the "VIP").
+- **Rule**: `Tcp 15001 → 15001` (server port), backend pool = master NICs.
+- **Health probe**: `Tcp :15150` (active-only port), `intervalInSeconds=5`
+  (Azure minimum), `probe-threshold` small.
+- **NSG on master NICs**: allow `15001` from `VirtualNetwork` (server), the MOM
+  service port from the compute subnet, and `15150` from `AzureLoadBalancer` -
+  with higher precedence than any deny-Internet rule.
+- Hairpin caveat: the LB does not serve a client colocated on the same host as
+  the active. Keep clients/compute MOMs on separate hosts (the cloud model).
 
-- **Clients** run on your/admin hosts, not on the master.
-- **Compute MOMs** are separate nodes (or auto-scaled/elastic) that join via the
-  LB/private IP — they are never co-resident with a master (the master is not a
-  compute node).
+### Azure Database for PostgreSQL Flexible
+- **SKU**: Burstable `B1ms` (1 vCore/2 GiB) is fine for small/test; General
+  Purpose `D2s_v3`-class for larger clusters. Reserve enough vCores/RAM for the
+  job-queue write rate (each job mutation is a small UPSERT).
+- **Storage**: GPSSD; size for job/queue metadata (KBs/job) - 32 GiB is plenty
+  for thousands of jobs; add throughput if start-up bursts are heavy.
+- **Version**: 16 (works with the pure-Go `pgx` driver).
+- **Connectivity**: must allow the master VMs' source IPs (public access +
+  firewall, or VNet integration). Firewall note: public-access rules match the
+  VM's **public egress** IP, so open by subnet range or use `AllowAll` behind a
+  firewall (test) / VNet integration (prod).
+- **DB schema perms**: the app role needs `USAGE, CREATE` (or ownership) on the
+  `public` schema to create `ot_state`/`ot_queues`/`ot_jobs`/`ot_lease`.
+- **HA of the DB itself**: enable zone-redundant/HA if the DB must not be a
+  single point of failure.
 
-Keep masters as pure control-plane VMs; run MOMs on dedicated compute nodes, so
-every client and every MOM reaches the LB cross-host and follows the active
-automatically.
+## Best practices
+
+1. **Separate compute MOMs from masters** (masters = control plane only). This
+   is both the cloud model and the fix for the LB hairpin caveat.
+2. **All daemons under systemd** (`pbs_server` + `pbs_sched` on masters,
+   `pbs_mom` on compute). On reboot, if only `pbs_server` starts, jobs stay
+   queued - `pbs_sched` must start too. `configs/systemd/` + `/etc/opentorque/ha.env`.
+3. **Shared, deterministic config**: same 32-byte `auth_key`, same
+   `server_name`, LB-backend membership, `ha.env` identical across masters.
+4. **Tune the LB probe** to `5 s` (Azure minimum) to shrink the switchover; keep
+   the lease TTL at 10 s unless you want more aggressive failover.
+5. **If the DB must be highly available itself, enable the managed PG's HA** -
+   otherwise the database is the single point of failure.
+6. For **single-master**, use a **pre-baked custom image + one-instance VMSS**
+   to get ~2-4 min auto-replacement at minimum cost.
+7. **Automate drills** with `scripts/ha-failover-drill.sh` after every topology
+   change so a regression can't silently break failover.
+8. Use the **Standard** LB SKU and reach every client/MOM cross-host for correct
+   LB forwarding (no hairpin).

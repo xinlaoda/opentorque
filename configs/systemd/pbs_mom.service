@@ -1,12 +1,14 @@
 [Unit]
-Description=OpenTorque PBS MOM
-After=network.target
+Description=OpenTorque PBS MOM (compute node)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 ExecStart=/usr/local/sbin/pbs_mom -D -d /var/spool/torque
 Restart=on-failure
-RestartSec=5
+RestartSec=3
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target

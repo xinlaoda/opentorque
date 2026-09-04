@@ -1,12 +1,18 @@
 [Unit]
-Description=OpenTorque PBS Server
-After=network.target
+Description=OpenTorque PBS Server (HA)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
+# Optional HA env file (see docs/opentorque-ha.md):
+#   PBS_HA=1, PBS_PG_DSN=postgres://...?sslmode=require,
+#   PBS_HA_HEALTH_PORT=15150, PBS_HA_VIP=..., PBS_HA_VIP_DEV=eth0
+EnvironmentFile=-/etc/opentorque/ha.env
 ExecStart=/usr/local/sbin/pbs_server -D -d /var/spool/torque -p 15001 -t warm
 Restart=on-failure
-RestartSec=5
+RestartSec=3
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target

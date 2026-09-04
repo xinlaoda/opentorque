@@ -1,16 +1,19 @@
 [Unit]
 Description=OpenTorque PBS Scheduler
-After=network.target
-Requires=pbs_server.service
+After=network-online.target
+Wants=network-online.target
 After=pbs_server.service
+PartOf=pbs_server.service
 
 [Service]
 Type=simple
-# User-assigned managed identity client id used by the Azure CRP (crp/azure.go).
-Environment=AZURE_CLIENT_ID=fa1728f6-9e62-4ffd-95a2-232f888c4814
+# Cloud-bursting provider identity (only needed for the Azure CRP; the
+# scheduler reads PBS_PG_DSN from ha.env only if we add it here).
+EnvironmentFile=-/etc/opentorque/ha.env
 ExecStart=/usr/local/sbin/pbs_sched -D -p /var/spool/torque
 Restart=on-failure
-RestartSec=5
+RestartSec=3
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target

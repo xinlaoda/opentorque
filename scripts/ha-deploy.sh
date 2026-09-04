@@ -61,10 +61,19 @@ deploy_one() { # deploy_one <vm> <is_master|is_compute>
   local ip; ip=$(az vm show -g "$RG" -n "$n" --query "publicIpAddress" -o tsv 2>/dev/null)
   [ -n "$ip" ] || ip=$(az vm list-ip-addresses -g "$RG" -n "$n" --query "[0].virtualMachine.network.publicIpAddresses[0].ipAddress" -o tsv)
   echo "  deploying $role to $n ($ip)"
-  # (on the VM): archive into repo, build, install daemons+CLI, config, systemd
-  # This step assumes the source is already on the VM (see NOTES). Reference impl:
-  #  scp -i "$SSH_PUB" ../../opentorque-src.tar azureuser@"$ip":/home/azureuser/
-  # then extract+build on the VM per deploy.sh (masters) / comp.sh (compute).
+  # (on the VM): archive into repo, build, install daemons+CLI, systemd, ha.env
+  # This step assumes the source archive is already on the VM (see NOTES). The
+  # essential on-VM steps are:
+  #  tar -xf opentorque-src.tar -C opentorque  (extract)
+  #  export GOTOOLCHAIN=local PATH=...:go ...   (build)
+  #  build+install daemons+CLIs to /usr/local/{sbin,bin}
+  #  mkdir -p /etc/opentorque
+  #  printf 'PBS_HA=1\nPBS_PG_DSN=%s\nPBS_HA_HEALTH_PORT=%s\n' "$PGDSN" "$LBHEALTH" \
+  #     | sudo tee /etc/opentorque/ha.env
+  #  install configs/systemd/pbs_server.service + pbs_sched.service
+  #  systemctl daemon-reload && systemctl enable --now pbs_server pbs_sched
+  #  (compute: install pbs_mom.service;  write mom_priv/config $pbsserver <fe>)
+  echo "  (deploy_one: see NOTES for on-VM build+systemd steps)"
   true
 }
 
