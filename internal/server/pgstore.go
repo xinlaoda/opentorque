@@ -14,6 +14,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -30,20 +31,40 @@ type PostgresStore struct {
 	pool *pgxpool.Pool
 }
 
-// NewPostgresStore connects to PostgreSQL and ensures the schema exists.
+// NewPostgresStore connects to PostgreSQL and ensures the schema exists. It
+// retries the DB connection/schema-ensure several times so a freshly-booted
+// master (e.g. an auto-replaced VMSS instance) is not knocked out of HA just
+// because DNS or the managed PostgreSQL is briefly unreachable right after boot
+// - without this, NewStore would fall back to the file store and lose HA.
 func NewPostgresStore(dsn string) (*PostgresStore, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	pool, err := pgxpool.New(ctx, dsn)
+	testCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	pool, err := pgxpool.New(testCtx, dsn)
+	cancel()
 	if err != nil {
 		return nil, fmt.Errorf("pg store: parse/connect: %w", err)
 	}
-	if err := pgEnsureSchema(ctx, pool); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("pg store: ensure schema: %w", err)
+
+	const (
+		maxAttempts = 15
+		attemptTO   = 8 * time.Second
+		retryGap    = 4 * time.Second
+	)
+	var lastErr error
+	for i := 0; i < maxAttempts; i++ {
+		aCtx, aCancel := context.WithTimeout(context.Background(), attemptTO)
+		err := pgEnsureSchema(aCtx, pool)
+		aCancel()
+		if err == nil {
+			return &PostgresStore{pool: pool}, nil
+		}
+		lastErr = err
+		log.Printf("[SERVER] pg store: ensure schema attempt %d/%d failed: %v", i+1, maxAttempts, err)
+		if i < maxAttempts-1 {
+			time.Sleep(retryGap)
+		}
 	}
-	return &PostgresStore{pool: pool}, nil
+	pool.Close()
+	return nil, fmt.Errorf("pg store: ensure schema (after %d tries): %w", maxAttempts, lastErr)
 }
 
 // pgEnsureSchema creates the state tables if they do not exist yet.
