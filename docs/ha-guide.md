@@ -42,10 +42,10 @@ a machine fails, with **no job loss**:
 | | Dual-master (hot standby) | Single-master (auto-replace) |
 |---|---|---|
 | Masters | 2 control-plane VMs | 1 control-plane VM |
-| Failover | **~16-20 s** | ~16 s (once a new master is up) + provisioning (~2-4 min) |
+| Failover | **~16-20 s** | **~45 s** end-to-end (measured) when the image is ready |
 | Cost | +1 master VM | saves that VM |
 | Best for | minimizing downtime | minimizing cost |
-| Replacement | standby takes over instantly | VMSS / custom image re-provisions |
+| Replacement | standby takes over instantly | VMSS from a generalized image auto-re-provisions (needs a NAT gateway) |
 
 Both use the same managed PostgreSQL + internal LB + active-only health port, so
 the state model and client behavior are identical.
@@ -111,3 +111,4 @@ is provisioned automatically when the old one dies.
 
 See `docs/opentorque-ha.md` for the full architecture, deployment, spec
 requirements and measured numbers.
+

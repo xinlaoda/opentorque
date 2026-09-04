@@ -8,8 +8,9 @@ internal load balancer as the VIP, and transparent failover.
 There are **two supported modes**:
 - **Dual-master (hot standby)** — recommended; two control-plane VMs, ~20 s
   failover.
-- **Single-master (auto-replace)** — cheaper; one control-plane VM, minutes
-  failover via VMSS/custom image.
+- **Single-master (auto-replace)** — cheaper; one control-plane VM, replaced
+  automatically by a one-instance VMSS from a generalized custom image. Measured
+  end-to-end **~45 s** RTO when the image is already ready.
 
 Both share the same state model: the authoritative cluster state lives in
 **managed PostgreSQL**, and an **internal load balancer** is the stable address
@@ -19,20 +20,20 @@ clients/MOMs use, following the active master via an active-only health port.
 
 ```
          clients / compute MOMs
-              │  connect to <frontend>:15001
-              ▼
-     ┌───────────────────────────────┐
-     │ Azure internal Load Balancer  │  = the VIP / stable address
-     │ frontend 10.0.0.10 · 15001    │
-     │ probe Tcp:15150 (active-only) │
-     └───────┬───────────────┬───────┘
-             ▼               ▼
+              |  connect to <frontend>:15001
+              v
+     +-------------------------------+
+     | Azure internal Load Balancer  |  = the VIP / stable address
+     | frontend 10.0.0.10 · 15001    |
+     | probe Tcp:15150 (active-only) |
+     +-------+---------------+-------+
+             v               v
       master A (VM1)     master B (VM2)     (dual)  OR  one master (single,
       pbs_server+           pbs_server+            replaced by VMSS/custom image)
       pbs_sched (systemd)    pbs_sched (systemd)
-             └────────┬──────┘
-                      ▼
-      Azure Database for PostgreSQL (managed)  ← lease election + ALL state
+             +--------+-------+
+                      v
+      Azure Database for PostgreSQL (managed)  <- lease election + ALL state
 ```
 
 ## How a leader is chosen (both modes)
@@ -55,10 +56,10 @@ from PostgreSQL.
 | File | Purpose |
 |---|---|
 | `scripts/ha-deploy.sh` | One-command Azure provisioning: VNet/NSG, managed PG, internal LB, two master VMs + compute node; phases `infra|masters|compute|all`. |
-| `scripts/ha-single-master-vmss.sh` | Single-master auto-replace: capture master custom image → one-instance VMSS in the LB backend → test auto-replacement (RTO ~2-4 min). |
+| `scripts/ha-single-master-vmss.sh` | Single-master auto-replace: NAT gateway + generalize golden VM -> capture custom image -> one-instance VMSS in the LB backend -> test auto-replacement (verified RTO ~45 s). |
 | `scripts/ha-failover-drill.sh` | Repeated drill: probe the LB frontend, stop the active, report the client-visible switchover window. |
 | `scripts/ha-status.sh` | Cluster status: lease holder, LB health, nodes, jobs. |
-| `scripts/ha-ops.sh` | Operations front-end: `status \| drill \| deploy \| vmss-setup \| stop-active \| start-master`. |
+| `scripts/ha-ops.sh` | Operations front-end: `status | drill | deploy | vmss-setup | stop-active | start-master`. |
 | `configs/systemd/*.service` | systemd units for `pbs_server`, `pbs_sched`, `pbs_mom`. |
 
 **On each master VM** (built and installed from the repo):
@@ -77,7 +78,7 @@ from PostgreSQL.
 | Var | Meaning | Default |
 |---|---|---|
 | `PBS_PG_DSN` | libpq DSN to the shared cluster DB | "" (file store) |
-| `PBS_HA` | non-empty ⇒ participate in leader election | "" |
+| `PBS_HA` | non-empty => participate in leader election | "" |
 | `PBS_HA_HEALTH_PORT` | port the ACTIVE opens for the LB probe | 0 (off) |
 | `PBS_HA_VIP` | optional floating CIDR to bind while active | "" |
 | `PBS_HA_VIP_DEV` | interface for the VIP | eth0 |
@@ -94,30 +95,27 @@ Both masters share the same `server_name` (stable job IDs) and the same 32-byte
   control planes sharing the LB backend).
 
 ### Single-master (auto-replace / VMSS)
-- **Pros**: one master VM cost saved; Azure can auto-replace via VMSS+custom
-  image; simplest control plane.
-- **Cons**: **minutes-level RTO** (~90 s reboot of the same VM, ~2-4 min new VM
-  from a pre-baked image, ~5-8 min if software is installed at boot); a cold
-  window with no active master while replacing; requires all daemons to be
-  systemd-managed so the new VM self-heals.
+- **Pros**: one master VM cost saved; Azure can auto-replace via VMSS + a
+  generalized custom image; simplest control plane; ~45 s auto-replacement
+  when the image is already ready.
+- **Cons**: a cold window with no active master while replacing; requires all
+  daemons to be systemd-managed so the new VM self-heals; requires a NAT gateway
+  and a baked-in PG-boot-resilience so the replaced master can join HA.
 
 ## Measured switchover
 
 | scenario | client-visible outage |
 |---|---|
-| dual-master, LB probe at default 15 s | ≈ 39 s |
-| dual-master, LB probe tuned to 5 s (Azure min) | **≈ 16-20 s** (measured 16.2 s) |
-| image-master replacement: failover phase (new master already up) | **≈ 16 s** (measured) |
-| single-master, reboot the same VM (software installed) | **≈ 86 s** |
-| single-master, VMSS auto-replace (custom image) | ≈ 2-4 min (provisioning-bound) + ~16 s failover |
-| single-master, new VM with boot-time script install | ≈ 5-8 min |
+| dual-master, LB probe at default 15 s | approx 39 s |
+| dual-master, LB probe tuned to 5 s (Azure min) | **approx 16-20 s** (measured 16.2 s) |
+| image-master replacement: failover phase (new master already up) | **approx 16 s** (measured) |
+| single-master, reboot the same VM (software installed) | **approx 86 s** |
+| single-master, VMSS auto-replace (generalized image + NAT) | **approx 45 s** (measured end-to-end) |
+| single-master, new VM with boot-time script install | approx 5-8 min |
 
-The replace time is dominated by **provisioning the new master VM** (custom
-image / VMSS boot); the actual **failover (lease + health-port + LB flip) is
-~16 s** once the new master is up - verified end-to-end (a snapshot-derived
-master VM took over in 16.3 s and served a job `C`/exit 0). The RTO table
-splits "provision" from "failover": the 2-4 min row is the provision; add the
-~16 s failover on top.
+The dual-master failover (lease + health-port + LB flip) is ~16 s once the new
+active is up. For single-master auto-replace the ~45 s is the full
+client-visible RTO (provisioning an already-baked image + the ~16 s failover).
 
 Floor: the 10 s `PBS_HA` lease TTL (both modes) + the LB probe (min 5 s, Azure
 limit). Tune the lease TTL down if you want more aggressive failover.
@@ -132,13 +130,14 @@ Shared infra (excludes VM compute):
 | Azure internal Load Balancer (Basic, free option) | $0 |
 | Azure Database for PostgreSQL Flexible, B1ms + 32 GiB | $17-22 |
 |   + zone-redundant HA on the PG (DB not a SPOF) | +$14-16 |
+| NAT gateway (single-master mode only) | ~$10-15 |
 
-VM compute (not included above): each D2s_v3 ≈ $50-60/mo.
+VM compute (not included above): each D2s_v3 approx $50-60/mo.
 
 | deployment | estimate |
 |---|---|
-| **Dual-master** (2× master + 1 compute + LB + PG) | ≈ $180-210/mo |
-| **Single-master** (1× master + 1 compute + LB + PG) | ≈ $130-155/mo |
+| **Dual-master** (2x master + 1 compute + LB + PG) | approx $180-210/mo |
+| **Single-master** (1x master + 1 compute + LB + PG + NAT) | approx $140-170/mo |
 | (add PG zone-redundant HA) | +$14-16/mo |
 
 > The PostgreSQL is the single source of truth; if it must itself be HA (not a
@@ -150,7 +149,7 @@ VM compute (not included above): each D2s_v3 ≈ $50-60/mo.
 ### Internal Load Balancer
 - **SKU**: Standard (Basic is free but lacks health-probe tuning/features).
 - **Frontend**: a private IP in the master subnet (the "VIP").
-- **Rule**: `Tcp 15001 → 15001` (server port), backend pool = master NICs.
+- **Rule**: `Tcp 15001 -> 15001` (server port), backend pool = master NICs.
 - **Health probe**: `Tcp :15150` (active-only port), `intervalInSeconds=5`
   (Azure minimum), `probe-threshold` small.
 - **NSG on master NICs**: allow `15001` from `VirtualNetwork` (server), the MOM
@@ -166,14 +165,21 @@ VM compute (not included above): each D2s_v3 ≈ $50-60/mo.
 - **Storage**: GPSSD; size for job/queue metadata (KBs/job) - 32 GiB is plenty
   for thousands of jobs; add throughput if start-up bursts are heavy.
 - **Version**: 16 (works with the pure-Go `pgx` driver).
-- **Connectivity**: must allow the master VMs' source IPs (public access +
-  firewall, or VNet integration). Firewall note: public-access rules match the
-  VM's **public egress** IP, so open by subnet range or use `AllowAll` behind a
-  firewall (test) / VNet integration (prod).
+- **Connectivity**: master VMs must reach it. For private VMSS instances (no
+  public IP), attach a **NAT gateway** to the subnet so they have outbound
+  access (managed-PG private connectivity via VNet integration is the
+  alternative for prod).
 - **DB schema perms**: the app role needs `USAGE, CREATE` (or ownership) on the
   `public` schema to create `ot_state`/`ot_queues`/`ot_jobs`/`ot_lease`.
 - **HA of the DB itself**: enable zone-redundant/HA if the DB must not be a
   single point of failure.
+
+### NAT gateway (single-master mode only)
+- Needed because a private VMSS instance has no public IP / outbound, but a
+  freshly-booted master must reach the managed PostgreSQL at boot or it falls
+  back to the file store and stays out of HA. Without it the VMSS instance
+  repeatedly hit `context deadline exceeded` connecting to the managed PG
+  (observed live).
 
 ## Best practices
 
@@ -188,53 +194,55 @@ VM compute (not included above): each D2s_v3 ≈ $50-60/mo.
    the lease TTL at 10 s unless you want more aggressive failover.
 5. **If the DB must be highly available itself, enable the managed PG's HA** -
    otherwise the database is the single point of failure.
-6. For **single-master**, use a **pre-baked custom image + one-instance VMSS**
-   to get ~2-4 min auto-replacement at minimum cost.
+6. For **single-master**, use a **pre-baked generalized custom image + a
+   one-instance VMSS + NAT gateway** to get ~45 s auto-replacement at minimum
+   cost.
 7. **Automate drills** with `scripts/ha-failover-drill.sh` after every topology
    change so a regression can't silently break failover.
 8. Use the **Standard** LB SKU and reach every client/MOM cross-host for correct
    LB forwarding (no hairpin).
 
+## Custom image for single-master auto-replace (verified live)
 
-### Custom image for single-master auto-replace (verified)
-
-Newer Azure images are **TrustedLaunch**, so `az image create` from a running
-master is disallowed. The working route (verified live on westus3): build a
-**Shared Image Gallery** image version from the master's OS-disk snapshot with
-`--os-state Specialized --features SecurityType=TrustedLaunch` (no generalizing -
-the master stays online), then run a one-instance Uniform VMSS from it:
+Newer Azure marketplace images are **TrustedLaunch**, and `az image create`
+from a TrustedLaunch VM is **disallowed**. The verified working route (westus3)
+is a **generalized, non-TrustedLaunch (Gen1) golden VM**:
 
 ```bash
-az sig create        -g "$RG" --gallery-name otxSig -l "$LOC"
-az sig image-definition create -g "$RG" --gallery-name otxSig \
-  --gallery-image-definition otxImgDef --publisher otx --offer otx --sku otx \
-  --os-type Linux --os-state Specialized --features SecurityType=TrustedLaunch
-az sig image-version create -g "$RG" --gallery-name otxSig \
-  --gallery-image-definition otxImgDef --gallery-image-version 1.0.0 \
-  --target-regions "$LOC" --replica-count 1 --os-snapshot <snapshot-id>   # minutes
-az vmss create -g "$RG" -n otx-vmss --image <sig-version-id> --vm-sku Standard_D2s_v3 \
+# 1) Disposable golden VM (non-TLS Marketplace Ubuntu) with opentorque + systemd
+#    + /etc/opentorque/ha.env installed. Then prepare it for generalize:
+ssh golden "sudo waagent -deprovision+user"
+az vm generalize -g "$RG" -n golden
+az image create -g "$RG" -n otx-master-img --source golden -l "$LOC"
+
+# 2) A SPECIALIZED image does NOT work: `az vmss create` rejects "OSProfile is
+#    not allowed with a specialized image". Use the generalized image.
+az vmss create -g "$RG" -n otx-vmss --image otx-master-img --vm-sku Standard_D2s_v3 \
   --instance-count 1 --orchestration-mode Uniform --subnet "$SUBNET" \
-  --load-balancer <lb> --backend-pool-name <pool> --public-ip-address ""
+  --load-balancer "$LB" --backend-pool-name "$LBPOOL" --public-ip-address ""
 ```
 
-`scripts/ha-single-master-vmss.sh` captures this end-to-end. Verified live:
-a generalized non-TrustedLaunch image was created and a one-instance Uniform VMSS
-from it joined the LB backend pool. **Important finding:** a freshly-booted master
-must reach the managed PostgreSQL within the store connect timeout, or it falls
-back to the file store and does not enter HA (health port not opened -> LB does
-not serve it). Bake a PG-wait / connect-retry into `pbs_server`'s `ExecStartPre`
-(or give `NewPostgresStore` a retried schema-ensure) so an auto-replaced master
-always joins the cluster.
- **Important:** a
-SPECIALIZED image cannot be used with `az vmss create` (Azure rejects "OSProfile
-is not allowed with a specialized image"). The working VMSS route is a
-**generalized** image from a disposable golden VM (`waagent -deprovision+user`
-+ `az vm generalize` + `az image create`), which the script documents as Route A.
-(A live VMSS auto-replace run was attempted in this session but blocked by that
-Azure specialized-image constraint and the TrustedLaunch `image create` rule;
-the measured replacement-master failover is ~16 s and total RTO ≈ provisioning
-+ ~16 s.) Total auto-replace
-RTO ≈ provisioning (~2-4 min) + ~16 s failover. In this session the SIG image
-version was created and verified against the TrustedLaunch snapshot; the VMSS
-creation step from it is the documented follow-on (the az CLI `vmss create`
-argument surface varies by CLI version - adjust as needed).
+**Critical prerequisites (both verified live):**
+1. **NAT gateway on the subnet.** VMSS instances are private (no public IP /
+   outbound). A freshly-booted master must reach the managed PostgreSQL at boot
+   (`NewPostgresStore` connect + schema-ensure, which now retries; commit
+   38d5e1f) or it falls back to the **file store** and does **not** enter HA -
+   no health port -> the LB never serves it. Without the NAT gateway, the VMSS
+   instance repeatedly hit `context deadline exceeded` connecting to the managed
+   PG. Attach a NAT gateway to the subnet so the replaced master has outbound
+   access.
+2. **Boot resilience baked in.** Give `pbs_server.service` an `ExecStartPre`
+   that waits for the PG DNS/TCP (or rely on `NewPostgresStore`'s retried
+   schema-ensure) so the replaced master always joins the cluster.
+
+**Auto-replace trigger:** use `az vmss scale --new-capacity 1` - **not**
+`az vmss delete-instances`, which only shrinks to 0 and does not rebuild.
+Setting capacity back to 1 re-creates a fresh instance from the image, which
+auto-joins the LB backend pool, takes the `ot_lease` (holder = its hostname),
+and serves jobs.
+
+**Measured end-to-end** (westus3, image already ready): scale trigger
+`1788561501.071` -> new master up + HA + health port + LB frontend UP at
+`1788561546.486` = **~45 s RTO**. The failover (lease + health-port + LB flip)
+alone remains ~16 s once the new master is up; the rest is Azure provisioning
+the replacement VM.

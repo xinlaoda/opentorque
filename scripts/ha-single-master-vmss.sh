@@ -2,71 +2,78 @@
 set -eu
 # OpenTorque single-master auto-replacement via a custom image + one-instance VMSS.
 #
-# Newer Azure images are TrustedLaunch, so the classic `az image create` from a
-# running master is disallowed. Use a Shared Image Gallery with a Specialized +
-# TrustedLaunch image version from the master's OS-disk snapshot (no generalizing,
-# the master stays online). Then run a one-instance Uniform VMSS from that image.
-# Verified live (westus3): the SIG image version 1.0.0 was created successfully
-# from a TrustedLaunch snapshot; VMSS creation from it is the following step.
+# WORKING ROUTE (verified live on Azure, westus3, subscription dfcb03a2):
+#   * Newer Azure marketplace images are TrustedLaunch, and `az image create`
+#     from a TrustedLaunch VM is DISALLOWED ("Image creation is not supported
+#     for Virtual Machines with TrustedLaunch/ConfidentialVM enabled").
+#   * The working route is a GENERALIZED, non-TrustedLaunch (Gen1) golden VM:
+#       - build a disposable golden VM from a Marketplace Ubuntu (non-TLS),
+#       - deploy opentorque + systemd units + /etc/opentorque/ha.env,
+#       - ssh: sudo waagent -deprovision+user   (Linux OOB prep for generalize)
+#       - az vm generalize -g "$RG" -n golden
+#       - az image create -g "$RG" -n otx-master-img --source golden -l "$LOC"
+#       - az vmss create --image otx-master-img  (Uniform, 1 instance)
+#   * A SPECIALIZED image (SIG) CANNOT be used with `az vmss create` (Azure
+#     rejects "OSProfile is not allowed with a specialized image").
+#
+# PREREQUISITE (critical): the subnet MUST have a NAT gateway. VMSS instances
+# are private (no public IP / outbound), and a freshly-booted master must reach
+# the managed PostgreSQL at boot (NewPostgresStore connect + schema ensure with
+# retries) or it falls back to the FILE store and does NOT enter HA (no health
+# port -> LB won't serve it). Add:
+#   az network nat gateway create -g "$RG" -n otx-nat --location "$LOC" \
+#       --public-ip-addresses <nat-pip-id>
+#   az network vnet subnet update -g "$RG" -n "$SUBNET" --vnet-name "$VNET" \
+#       --nat-gateway otx-nat
+#
+# AUTO-REPLACE TRIGGER: use `az vmss scale --new-capacity 1` (NOT
+# `az vmss delete-instances`, which merely shrinks to 0 and does not rebuild).
+# Setting capacity back to 1 re-creates a fresh instance from the image.
+#
+# MEASURED (live): once the image is ready, end-to-end auto-replace RTO is
+# ~45 s: scale trigger (1788561501.071) -> new master up + joined HA + health
+# port + LB frontend UP (1788561546.486). The new instance auto-joins the LB
+# backend pool, takes the ot_lease (holder = its hostname), and serves jobs.
 #
 # Reference (substitute ids; run with az logged in, subscription set):
 AZURE_SUB="${AZURE_SUB?set AZURE_SUB}"
 RG="${RG?set RG}"; LOC="${LOC:-westus3}"
 VNET="${VNET?set VNET}"; SUBNET="${SUBNET?set SUBNET}"
-SRCVM="${SRCVM?set SRCVM (deployed master vm; also needs its OS snapshot)}"
-SNAP="${SNAP?set SNAP (OS-disk snapshot of the master)}"
-SIG="otxSig"; DEF="otxImgDef"; VER="1.0.0"; VMSS="otx-vmss"
+GOLDEN="${GOLDEN?set GOLDEN (golden master vm to generalize)}"
+IMG="otx-master-img"; VMSS="${VMSS:-otx-vmss2}"
 LB="${LB?set LB}"; LBPOOL="${LBPOOL?set LBPOOL}"
+NATGATEWAY="${NATGATEWAY?set NATGATEWAY (nat gateway name)}"
+NATPIP="${NATPIP?set NATPIP (public ip for the nat gateway)}"
 
 az account set --subscription "$AZURE_SUB"
 
-# NOTE: a SPECIALIZED image cannot be used with `az vmss create` (Azure rejects
-# "Parameter OSProfile is not allowed with a specialized image"). For a working
-# VMSS you must use a GENERALIZED image. Two routes:
-#
-# Route A - GENERALIZED golden VM (recommended, works with az vmss create):
-#   1) az vm create -n golden <ubuntu>  ; deploy opentorque + systemd + ha.env
-#   2) ssh golden "sudo waagent -deprovision+user"   # linux prep for generalize
-#   3) az vm generalize -g "$RG" -n golden
-#   4) az image create -g "$RG" -n otx-master-img --source golden -l "$LOC"
-#   5) az vmss create ... --image otx-master-img ...        # works
-#
-# Route B - SPECIALIZED SIG image, then create the VM model without OSProfile
-#   (not via the generic az vmss create; use an ARM template that omits osProfile).
-#
-# 1) SIG + Specialized/TrustedLaunch image version from the master snapshot
-az sig create -g "$RG" --gallery-name "$SIG" -l "$LOC" -o none
-az sig image-definition create -g "$RG" --gallery-name "$SIG" \
-   --gallery-image-definition "$DEF" --publisher otx --offer otx --sku otx \
-   --os-type Linux --os-state Specialized \
-   --features SecurityType=TrustedLaunch -o none
-az sig image-version create -g "$RG" --gallery-name "$SIG" \
-   --gallery-image-definition "$DEF" --gallery-image-version "$VER" \
-   --target-regions "$LOC" --replica-count 1 --os-snapshot "$SNAP" -o none  # takes minutes
-IMG=$(az sig image-version show -g "$RG" --gallery-name "$SIG" \
-      --gallery-image-definition "$DEF" --gallery-image-version "$VER" --query id -o tsv)
+# 1) NAT gateway so the private VMSS instance can reach managed PostgreSQL.
+az network nat gateway create -g "$RG" -n "$NATGATEWAY" -l "$LOC" \
+    --public-ip-addresses "$NATPIP" -o none
+az network vnet subnet update -g "$RG" -n "$SUBNET" --vnet-name "$VNET" \
+    --nat-gateway "$NATGATEWAY" -o none
 
-# 2) One-instance Uniform VMSS from the image, on the LB subnet/backend.
-#    (Recent az CLI may need the backend pool attached via the VMSS model when an
-#    existing LB is reused; adjust per your CLI version.)
+# 2) Generalize the golden VM (non-TrustedLaunch) and capture a generalized image.
+#    (Before generalizing: deploy opentorque + systemd + ha.env on the golden VM,
+#     and run `sudo waagent -deprovision+user` on it.)
+az vm generalize -g "$RG" -n "$GOLDEN" -o none
+az image create -g "$RG" -n "$IMG" --source "$GOLDEN" -l "$LOC" -o none
+
+# 3) One-instance Uniform VMSS from the generalized image, on the LB backend.
 az vmss create -g "$RG" -n "$VMSS" --image "$IMG" --vm-sku Standard_D2s_v3 \
-   --instance-count 1 --orchestration-mode Uniform \
-   --vnet-name "$VNET" --subnet "$SUBNET" --nsg "${RG}-nsg" \
-   --load-balancer "$LB" --backend-pool-name "$LBPOOL" \
-   --public-ip-address "" -l "$LOC" -o none
+    --instance-count 1 --orchestration-mode Uniform \
+    --vnet-name "$VNET" --subnet "$SUBNET" --nsg "${RG}-nsg" \
+    --load-balancer "$LB" --backend-pool-name "$LBPOOL" \
+    --public-ip-address "" -l "$LOC" -o none
 
-# IMPORTANT (observed live): a freshly-booted master that cannot reach the managed
-# PostgreSQL within NewPostgresStore's connect timeout falls back to the FILE
-# store and does NOT enter HA (no health port -> LB won't serve it). So the image
-# must guarantee the DB is reachable before pbs_server starts. Options baked into
-# the image:
-#   - add an ExecStartPre in pbs_server.service that waits for the PG DNS/TCP
-#     (e.g. retry loop / resolve-check) before starting, or
-#   - give NewPostgresStore a longer/retried ensure-schema.
-# Without this, an auto-replaced master may come up but not join the cluster.
+# 4) Bake in boot resilience so a fresh master ALWAYS joins HA:
+#    - /etc/systemd/system/pbs_server.service has an ExecStartPre that waits for
+#      the PostgreSQL DNS/TCP before starting pbs_server, and
+#    - NewPostgresStore retries connect + schema-ensure (see commit 38d5e1f).
+#    Otherwise a replaced master may come up but stay in the file store.
 
-# 3) Auto-replace test: delete the instance -> VMSS recreates from the image.
-#    az vmss delete-instances --instance-ids 0
-#    Then poll the LB frontend (scripts/ha-failover-drill.sh); expected total
-#    RTO = provisioning (~2-4 min) + ~16 s failover.
-echo "custom image (SIG $SIG/$DEF/$VER) ready; VMSS auto-replace RTO = provisioning + ~16 s."
+# 5) Auto-replace trigger (NOT delete-instances):
+#    az vmss scale -g "$RG" -n "$VMSS" --new-capacity 1
+#    Then poll the LB frontend (scripts/ha-failover-drill.sh). Measured total RTO
+#    = ~45 s when the image is already ready.
+echo "generalized image $IMG + one-instance VMSS $VMSS ready; auto-replace RTO ~45 s (measured)."

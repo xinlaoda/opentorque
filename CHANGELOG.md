@@ -7,6 +7,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Single-master auto-replace (TODO 5.1), verified live on Azure.** A one-instance
+  Uniform VMSS booted from a **generalized, non-TrustedLaunch (Gen1)** custom image
+  (`otx-master-img`) auto-replaces a dead master without state loss. Two live findings
+  are documented and scripted (`scripts/ha-single-master-vmss.sh`): (1) a **NAT
+  gateway must be attached to the subnet** - a private VMSS instance has no outbound
+  path, and a freshly-booted master that cannot reach the managed PostgreSQL at boot
+  falls back to the file store and stays out of HA; (2) the rebuild trigger is
+  `az vmss scale --new-capacity 1` (`az vmss delete-instances` only shrinks to 0).
+  Measured end-to-end RTO **~45 s** (scale trigger 1788561501.071 -> LB frontend UP
+  at 1788561546.486), including the ~16 s failover (lease + health-port + LB flip).
+  TrustedLaunch `az image create` is rejected, so the route is a generalized golden
+  VM (waagent deprovision + generalize + image create).
+
 ### Changed
 - **HA crash-recovery reconciliation (TODO 5.1 Phase 0).** On server start
   `recoverJobs` keeps Running jobs Running and `restoreRecoveredRunningJobs`
@@ -235,3 +249,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Server, Compute (MOM), and CLI packages
   - Embedded auth_key generation at build time
   - systemd-ready postinst/prerm scripts
+
+

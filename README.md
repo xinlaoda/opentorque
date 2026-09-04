@@ -235,8 +235,9 @@ Two modes:
   (jobs/queues/nodes) carries over via the shared DB, and running jobs are
   reconciled so they are never re-dispatched.
 - **Single-master (auto-replace)** — one control-plane VM; on death a new master
-  is provisioned from a custom image / VMSS. Failover (once the new master is
-  up) is **~16 s**; the total RTO is dominated by VM provisioning (~2-4 min).
+  is provisioned from a generalized custom image + a one-instance VMSS. Measured
+  end-to-end **~45 s** RTO (needs a NAT gateway so the replaced master reaches
+  the managed PostgreSQL at boot).
 
 All masters run daemons under **systemd** (so a reboot self-heals the full
 control plane) and share a 32-byte `auth_key` and `server_name`.
@@ -385,3 +386,4 @@ that established the batch scheduling paradigm that OpenTorque builds upon.
 OpenTorque is licensed under the [Apache License 2.0](LICENSE).
 
 See [NOTICE](NOTICE) for attribution details.
+

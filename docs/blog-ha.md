@@ -73,8 +73,7 @@ custom image (e.g. a single-instance VMSS). State is still in PostgreSQL and
 the LB still follows the health port, so the new master picks up where the old
 one left off.
 
-- **Failover once the new master is up: ~16 s.**
-- **Total RTO ≈ provisioning time (~2–4 min with a custom image) + ~16 s.**
+- **End-to-end RTO ~45 s** (measured) with a pre-baked generalized image - a private VMSS instance needs a **NAT gateway** (outbound) to reach the managed PostgreSQL at boot, otherwise the replaced master falls back to the file store and stays out of HA.
 
 The trade-off is cost vs. downtime. See
 `scripts/ha-single-master-vmss.sh` for the image/VMSS setup.
@@ -101,3 +100,7 @@ The trade-off is cost vs. downtime. See
 *OpenTorque HA is cloud-native by design: managed PostgreSQL + internal LB as
 the VIP + lease-based leadership, with a single-master economy option. The
 source is in `docs/opentorque-ha.md` and the scripts in `scripts/`.*
+
+
+
+
