@@ -192,3 +192,31 @@ VM compute (not included above): each D2s_v3 ≈ $50-60/mo.
    change so a regression can't silently break failover.
 8. Use the **Standard** LB SKU and reach every client/MOM cross-host for correct
    LB forwarding (no hairpin).
+
+
+### Custom image for single-master auto-replace (verified)
+
+Newer Azure images are **TrustedLaunch**, so `az image create` from a running
+master is disallowed. The working route (verified live on westus3): build a
+**Shared Image Gallery** image version from the master's OS-disk snapshot with
+`--os-state Specialized --features SecurityType=TrustedLaunch` (no generalizing -
+the master stays online), then run a one-instance Uniform VMSS from it:
+
+```bash
+az sig create        -g "$RG" --gallery-name otxSig -l "$LOC"
+az sig image-definition create -g "$RG" --gallery-name otxSig \
+  --gallery-image-definition otxImgDef --publisher otx --offer otx --sku otx \
+  --os-type Linux --os-state Specialized --features SecurityType=TrustedLaunch
+az sig image-version create -g "$RG" --gallery-name otxSig \
+  --gallery-image-definition otxImgDef --gallery-image-version 1.0.0 \
+  --target-regions "$LOC" --replica-count 1 --os-snapshot <snapshot-id>   # minutes
+az vmss create -g "$RG" -n otx-vmss --image <sig-version-id> --vm-sku Standard_D2s_v3 \
+  --instance-count 1 --orchestration-mode Uniform --subnet "$SUBNET" \
+  --load-balancer <lb> --backend-pool-name <pool> --public-ip-address ""
+```
+
+`scripts/ha-single-master-vmss.sh` captures this end-to-end. Total auto-replace
+RTO ≈ provisioning (~2-4 min) + ~16 s failover. In this session the SIG image
+version was created and verified against the TrustedLaunch snapshot; the VMSS
+creation step from it is the documented follow-on (the az CLI `vmss create`
+argument surface varies by CLI version - adjust as needed).

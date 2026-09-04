@@ -221,6 +221,32 @@ load_balancing: false   ALL
 
 See [docs/scheduling_algorithms.md](docs/scheduling_algorithms.md) for the full algorithm reference.
 
+## High Availability (cloud-native)
+
+OpenTorque provides **high availability for cloud deployments (Azure-first)**
+with transparent failover and zero state loss, because the authority lives in a
+**managed database** and an **internal load balancer** is the stable address
+clients and compute MOMs use.
+
+Two modes:
+- **Dual-master (hot standby)** — two control-plane VMs share a managed
+  PostgreSQL; a lease elects one active; an active-only health port tells the
+  load balancer where to send `15001`. Measured **~16-20 s** failover. State
+  (jobs/queues/nodes) carries over via the shared DB, and running jobs are
+  reconciled so they are never re-dispatched.
+- **Single-master (auto-replace)** — one control-plane VM; on death a new master
+  is provisioned from a custom image / VMSS. Failover (once the new master is
+  up) is **~16 s**; the total RTO is dominated by VM provisioning (~2-4 min).
+
+All masters run daemons under **systemd** (so a reboot self-heals the full
+control plane) and share a 32-byte `auth_key` and `server_name`.
+
+See [docs/opentorque-ha.md](docs/opentorque-ha.md) for deployment, scripts
+(`scripts/ha-deploy.sh`, `scripts/ha-failover-drill.sh`,
+`scripts/ha-single-master-vmss.sh`), settings, cost, LB/PostgreSQL sizing and
+best practices.
+
+
 ## Cloud Bursting (Elastic Cloud Pool)
 
 Cloud bursting lets a fixed local cluster **overflow onto cloud VMs only when
