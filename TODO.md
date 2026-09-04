@@ -112,7 +112,7 @@ under the 2.2 backfill knob.
 - Live test (2026-08-10, external scheduler, Azure westus3): see
   `docs/live-azure-verification-report.md` §2.1.
 
-### 2.2 Backfill / reservation / preemption  [DONE — backfill implemented & tested; reservations/preemption open]
+### 2.2 Backfill / reservation / preemption  [DONE - backfill implemented & tested; advance reservation & preemption de-scoped for cloud]
 **Backfill is implemented** in both schedulers. A blocked head-of-line job no
 longer holds back later jobs that fit the current free capacity:
 - External `pbs_sched`: new `backfill` sched-config knob (default on). With
@@ -121,8 +121,14 @@ longer holds back later jobs that fit the current free capacity:
   off, strict FIFO halts as before. Test `TestStrictStop`.
 - Built-in scheduler: `runScheduler` already iterates all queued jobs and
   dispatches any that fit, so it backfills naturally (FIFO order).
-- **Still open (large follow-ups):** advance job reservations with a future
-  start time, and preemption (suspend/requeue lower-priority running jobs).
+- **Advance reservation & preemption: intentionally NOT in scope for the cloud-native design.**
+  Because OpenTorque targets cloud (Azure-first) where capacity is elastic, hard future-time-window
+  reservation and preemption add little value: instead of reserving/pinning nodes ahead of time or
+  suspending a lower-priority job, the operator starts dedicated nodes on demand for the work and/or
+  routes it to a **dedicated queue + node group** (TODO 1.3 host groups), keeping it isolated from
+  other node groups and sized via cloud quota. qsub -a (deferred job -> becomes eligible at a future
+  time, then competes normally) already covers the 'run at time T' use case with no resource pinning.
+  See docs/opentorque-ha.md / docs/cloud-elastic-event-driven-design.md for the elastic model.
 
 ### 2.3 [BUG] `qsub` multiple `-l` flags overwrite each other  [DONE — fixed & live-tested]
 `cmd/qsub/main.go` now uses a repeatable flag value (`concatValue`) registered
