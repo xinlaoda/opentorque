@@ -774,10 +774,17 @@ total/free cores into the server status, surfaced by `qstat -B -f`:
   starting a new instance of the same job, and removes the sidecar on cleanup
   (commits d5fe0ed + e7ef26a).
 
-### 5.1 HA / failover  [GAP - crash-recovery foundation done (TODO 5.1 Phase 0)]
-Single `pbs_server`; no active/passive failover, no job migration, no server
-redundancy used in production. (The full failover infra is still open.)
-
+### 5.1 HA / failover  [DONE - implemented & live-tested]
+Full HA is implemented, cloud-native (Azure-first), and covered end-to-end by live tests:
+- **State/authority** lives in managed PostgreSQL (PostgresStore behind the Store interface), so masters are interchangeable and nothing binds to one machine's filesystem.
+- **Leader election & fencing-by-lease**: PBS_HA=1 elects exactly one active via the ot_lease row (10 s TTL / 3 s renewal); standbys are gated from dispatch (no split brain / double-run). The holder is the OS hostname (unique per master). Startup + takeover reconciliation (`recoverJobs`, `reconcileRunningJobsWithMOMs`) keeps a still-running job Running and requeues only confirmed-dead ones.
+- **Two supported modes, both live-verified on Azure (westus3, RG xxin-opentorque-test, managed PG otx-pg + internal LB otx-lb frontend 10.0.0.10:15001 over active-only health port 15150):
+  - *Dual-master (hot standby)*: two control-plane VMs share the LB backend; measured **~16-20 s** client-visible failover (tuned 5 s probe).
+  - *Single-master (auto-replace)*: one-instance VMSS from a **generalized non-TrustedLaunch (Gen1)** image; measured **~45 s** end-to-end RTO (needs a subnet **NAT gateway** so the private instance can reach managed PG at boot).
+- **Floating-VIP failover** (PBS_HA_VIP): active binds the VIP and releases on loss/shutdown; the takeover rebinds it (live-verified). With an internal LB the VIP is optional - the LB follows the active via the health port.
+- **Crash recovery (Phase 0)**: jobs/queues/nodes recovered from PG on takeover; running jobs never re-dispatched; orphans requeued (internal/server/reconcile_test.go).
+- **Production networking best practice** documented (Private Link for managed PG + ExpressRoute/VPN for enterprise clients + hardened public edge only for external clients).
+Docs: docs/opentorque-ha.md (reference), docs/ha-guide.md (user guide), docs/blog-ha.md; scripts under scripts/ha-*.sh.
 **Phase 0 done (2026-08-30):** startup/takeover reconciliation so a running
 job is never re-dispatched after a server crash, and orphans are requeued.
 - `recoverJobs` (internal/server) now keeps Running jobs Running (instead of
@@ -809,10 +816,6 @@ job is never re-dispatched after a server crash, and orphans are requeued.
   Floating-VIP address failover implemented (`PBS_HA_VIP`): the active binds the
   VIP, releases it on loss/shutdown, and the taking-over standby rebinds it so
   clients/MOMs at the VIP follow the leader (verified live on Azure).
-  Remaining for full HA: a true cross-host test (two VMs, each with its own MOM,
-  sharing one PG/VIP), and fencing to strictly guard against split-brain.
-- Remaining for full HA: active/standby (shared storage + VIP + fencing) or
-  auto-scale single-master; see design notes.
 
 ### 5.2 Completed-job status read-back  [DONE - implemented & tested]
 Finished jobs now keep their full attribute set and remain queryable through the
