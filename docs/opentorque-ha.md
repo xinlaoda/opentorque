@@ -104,10 +104,18 @@ Both masters share the same `server_name` (stable job IDs) and the same 32-byte
 | scenario | client-visible outage |
 |---|---|
 | dual-master, LB probe at default 15 s | ≈ 39 s |
-| dual-master, LB probe tuned to 5 s (Azure min) | **≈ 20 s** |
+| dual-master, LB probe tuned to 5 s (Azure min) | **≈ 16-20 s** (measured 16.2 s) |
+| image-master replacement: failover phase (new master already up) | **≈ 16 s** (measured) |
 | single-master, reboot the same VM (software installed) | **≈ 86 s** |
-| single-master, VMSS auto-replace (custom image) | ≈ 2-4 min (provisioning-bound) |
+| single-master, VMSS auto-replace (custom image) | ≈ 2-4 min (provisioning-bound) + ~16 s failover |
 | single-master, new VM with boot-time script install | ≈ 5-8 min |
+
+The replace time is dominated by **provisioning the new master VM** (custom
+image / VMSS boot); the actual **failover (lease + health-port + LB flip) is
+~16 s** once the new master is up - verified end-to-end (a snapshot-derived
+master VM took over in 16.3 s and served a job `C`/exit 0). The RTO table
+splits "provision" from "failover": the 2-4 min row is the provision; add the
+~16 s failover on top.
 
 Floor: the 10 s `PBS_HA` lease TTL (both modes) + the LB probe (min 5 s, Azure
 limit). Tune the lease TTL down if you want more aggressive failover.
