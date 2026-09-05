@@ -352,6 +352,7 @@ opentorque/
 - [High Availability (cloud-native) — reference](docs/opentorque-ha.md)
 - [High Availability — User Guide](docs/ha-guide.md)
 - [High Availability — Blog](docs/blog-ha.md)
+- [Fair-share in the cloud — change of mind](docs/blog-fair-share-cloud.md)
 - [Cloud Elastic — Event-Driven Design](docs/cloud-elastic-event-driven-design.md)
 - [Cloud Elastic — Node Scaling Design](docs/cloud-elastic-node-scaling-design.md)
 - [Cloud Cost Attribution (finops / chargeback)](docs/cloud-costing.md)

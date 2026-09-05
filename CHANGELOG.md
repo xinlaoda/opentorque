@@ -15,6 +15,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   idle/boot/drain time are handled and the full bill is covered (billed-but-empty nodes -> overhead).
   See `docs/cloud-costing.md`. Unit tests pass; `go vet` + `go test ./internal/cost/...` green on the VM.
 
+- **Cloud fair-share position paper (2.2/2.7/2.8).** Adds `docs/blog-fair-share-cloud.md` explaining
+  why classic fair-share / preemption / hard-quota engines lose their value on elastic cloud, and
+  the cloud-native replacements (cost attribution / chargeback, per-project caps, capacity tiers,
+  per-tenant isolation, platform quota). Aligned with the OpenTorque cloud-first posture.
+
 - **Single-master auto-replace (TODO 5.1), verified live on Azure.** A one-instance
   Uniform VMSS booted from a **generalized, non-TrustedLaunch (Gen1)** custom image
   (`otx-master-img`) auto-replaces a dead master without state loss. Two live findings
