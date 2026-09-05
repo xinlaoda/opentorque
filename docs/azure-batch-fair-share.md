@@ -145,7 +145,137 @@ To make this native and out-of-the-box, Azure Batch lacks several things:
 
 ---
 
-## 5. Bottom line
+## 5. Building it today: an external fair-share orchestrator on Azure Batch
+
+The previous sections describe the *shape* of cloud fairness. This section is
+the practical "can I build it with the APIs and events Azure Batch exposes
+today" answer. **Yes — and the recommended architecture is to run your
+fair-share logic in an external control plane and treat Batch as a
+scalable executor.** Batch already supplies every primitive you need: you use
+its APIs to place/scale/schedule, and its events as the accounting feed. What
+you must build yourself is the fairness business logic (admission, budget,
+apportionment, effective cost), which is exactly the part that should be yours.
+
+### 5.1 Component and data flow
+
+```
+   submitters
+      |
+      v
+ +------------------------------------------------------------+
+ |  Your external fair-share orchestrator (control plane)       |
+ |   - admission: account/quota/budget left?                    |
+ |   - routing:   pick per-project pool + tier (dedicated/spot) |
+ |   - scale:     pool resize (you are the autoscaler)          |
+ |   - bookkeeper: task usage, evictions, idle, effective cost  |
+ +----------+---------------------------+----------------------+
+      | submit                | listen                  | cost
+      v                       v                          v
+  Batch task/job          Event Grid /               Cost Management
+  + pool resize           Log Analytics              (PoolName tag / RG)
+                          (Batch events)
+```
+
+### 5.2 API / event surface you can drive today
+
+**Control (call)** — `az batch` / Batch SDK / Batch REST:
+
+| capability | API |
+|---|---|
+| submit work to a project's pool | `POST jobs/{job}/tasks` (also `jobs` create/update, `task priority`) |
+| scale a pool | `pool resize` (and `EvaluateAutoScale` to dry-run a formula without applying it) |
+| orchestrate lifecycle | `job terminate/disable`, `task terminate`, `node reboot/reimage`, `pool patch` (metadata/tags) |
+| read authoritative state | `pool get`, `job list/get`, `task list/get`, `node list/get` |
+
+**Events (subscribe via diagnostic settings → Event Grid / Log Analytics)**
+primary batch events used as the accounting feed:
+
+| event | what it gives your bookkeeper |
+|---|---|
+| `TaskStartEvent` / `TaskCompleteEvent` / `TaskFailEvent` / `TaskRetryEvent` | task begin/end timestamps → **vCPU-seconds** per task/project (× known VM size) |
+| `JobScheduledEvent` | a job became schedulable (queue depth trends) |
+| `PoolResizeCompleteEvent` / `PoolStartEvent` / `PoolDeleteEvent` | node up/down windows → **idle/boot billing** per pool |
+| low-priority node preemption event (`NodePreempted`-class) | **spot evictions** → effective-cost accounting |
+| node state events | reboot/reimage/maintenance windows |
+
+**Metrics** — Azure Monitor: per-pool/per-node CPU, `vcpu`, node count for
+live scaling signals. **Cost** — Cost Management queries grouped by the
+per-pool resource group or the auto `PoolName` tag (user-subscription mode,
+verified: Batch auto-tags each pool RG with `PoolName` + `BatchAccountName`).
+
+### 5.3 Pool resize state machine (you are the autoscaler)
+
+Driving `resize` from your orchestrator instead of Batch's hosted autoscale
+formula is the cleanest path (formulas are a small fixed function set; your
+policy is not). State machine to handle the async nature:
+
+```
+IDLE/steady ──resize(target)──► RESUMING (async) ──PoolResizeCompleteEvent┐
+    ▲                                     │  or poll allocationState        │
+    └────────── steady ◄──────────────────┘  until Steady                    │
+                         (provision/scale-in continues in the background)  ─┘
+on FAILURE (AllocationFailed / quota):  → backoff, alert, downgrade tier
+on eviction spike:                     → resize spot pool, retry tolerant tasks
+```
+
+Rules to encode:
+- One in-flight resize per pool; coalesce rapid calls (or use `autoscale` on
+  the pool with the effective formula if you prefer debounce built-in).
+- Scale-in only after a **grace / drain** period so in-flight tasks finish and
+  spot evictions don't lose re-runnable work.
+- Track your resize target vs `currentDedicatedNodes`/`currentLowPriorityNodes`
+  as the source of truth for idle-cost attribution.
+
+### 5.4 Accounting mapping (event -> per-project usage)
+
+```
+core_seconds(project, node) += (task_complete_ts - task_start_ts) * vcpu_used
+node_billed_hours: from PoolStart/PoolResizeComplete/Delete events (your resize history)
+idle_hours(node)  = billed_hours - busy(node-derived core-seconds/free capacity)
+eviction_cost     = per preempted spot task: retried work + wasted partial run
+apportion: node_bill split to projects by share of used core-seconds
+           (idle/boot -> pro-rata; billed-with-no-usage -> overhead bucket)
+```
+
+This mirrors the finops "node = cost pool, apportion by usage" model from
+`docs/cloud-costing.md`-style chargeback.
+
+### 5.5 Reconciliation — don't trust the event stream alone
+
+Batch events are **at-least-once, unordered, and can be lost**. Treat them as a
+fast-path accelerator, not as the source of truth:
+
+- **Authoritative state** = `task list` / `node list` / `pool get` polls, on
+  a safety-net interval.
+- Reconcile counters (running/allocation/idle) from polls and diff against
+  event-derived values; correct drift on `TaskComplete`/`PoolResizeComplete`.
+- Deduplicate events by idempotent keys (task id + recorded event timestamps)
+  so an idle/duplicated event can't double-count vCPU-seconds.
+- On orchestrator restart, rebuild state from Batch polls + your persisted
+  ledger, then resume event consumption.
+
+### 5.6 What you must build (Batch gives the primitives, not the fairness)
+
+1. Submission gate: account/quota/**budget** admission (reject or downgrade to
+   the spot tier when a project is over).
+2. Router: project -> per-project pool + tier, with per-project
+   dedicated/spot capacity caps.
+3. Bookkeeper: task vCPU-second computation, idle attribution, eviction
+   **effective cost**, and the apportionment split.
+4. The fairness policy itself (your score / caps / priority rules).
+
+### 5.7 Net assessment
+
+- **Fully implementable today** with Batch's control APIs + event feed +
+  Cost Management, especially in **user-subscription** mode where Batch
+  auto-tags each pool's resource group with `PoolName` for per-pool cost.
+- The honest gaps are the four things in 5.6 (budget admission, task-level
+  apportionment telemetry, eviction effective cost, and the policy) — and
+  these are rightly *your* control plane, not Batch's job.
+
+---
+
+## 6. Bottom line
 
 "Fair-share on Azure Batch" is **not a Batch scheduling algorithm** — Batch's
 pools, autoscale, spot pools, priority and tagging already supply the building
