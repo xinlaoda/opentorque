@@ -354,6 +354,7 @@ opentorque/
 - [High Availability — Blog](docs/blog-ha.md)
 - [Cloud Elastic — Event-Driven Design](docs/cloud-elastic-event-driven-design.md)
 - [Cloud Elastic — Node Scaling Design](docs/cloud-elastic-node-scaling-design.md)
+- [Cloud Cost Attribution (finops / chargeback)](docs/cloud-costing.md)
 - [Run as systemd services](configs/systemd/)
 - [Data Persistence](docs/data_persistence_analysis.md)
 - [CLI Reference](docs/cli.md)

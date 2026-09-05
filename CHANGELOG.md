@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Cloud cost attribution / chargeback (TODO 2.7).** `-A account` is parsed by `qsub`, stored on
+  the job (`Account_Name`), and written into accounting S/E records as `account=<acct>` (fixed
+  `buildJobInfo` to read `j.Account`). New `internal/cost` package + `pbs_cost` CLI apportion each
+  node's real VM bill across accounts by share of used core-seconds - so shared/multi-node jobs and
+  idle/boot/drain time are handled and the full bill is covered (billed-but-empty nodes -> overhead).
+  See `docs/cloud-costing.md`. Unit tests pass; `go vet` + `go test ./internal/cost/...` green on the VM.
+
 - **Single-master auto-replace (TODO 5.1), verified live on Azure.** A one-instance
   Uniform VMSS booted from a **generalized, non-TrustedLaunch (Gen1)** custom image
   (`otx-master-img`) auto-replaces a dead master without state loss. Two live findings

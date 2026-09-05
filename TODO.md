@@ -177,7 +177,7 @@ scheduling paths:
   while two `-l ncpus=1` jobs ran **R**; node status showed `used_cpus = 2` on
   the full node. Previously every job ran immediately regardless of `-l ncpus`.
 
-### 2.7 Accounts / projects / QoS - narrowed to cloud finops (classic fair-share de-scoped)  [GAP - lightweight cloud-native scope]
+### 2.7 Accounts / projects / QoS - narrowed to cloud finops (classic fair-share de-scoped)  [PARTIAL - account attribution + cost report done; caps/pool-QoS open]
 OpenTorque targets elastic cloud, so the classic hierarchical fair-share math (share of a
 fixed machine, decayed usage) and preemptive QoS are **de-scoped** - capacity scales out instead.
 What is still valuable (and more so than on-prem, where nobody pays marginal compute) is cost-
@@ -188,6 +188,16 @@ What is still valuable (and more so than on-prem, where nobody pays marginal com
 - QoS expressed via platform tiers - a project jobs are routed to the on-demand vs **spot** vs reserved
   node pool (TODO 1.3 host groups), rather than by suspending/requeueing other jobs. Placeholder
   until implemented; see docs/cloud-elastic-event-driven-design.md for the elastic pool model.
+
+**Implemented so far (2026-09-04):** account attribution + per-account cost report.
+- -A account` is parsed by qsub, stored on the job (Account_Name), and written into the
+  accounting S/E records as ccount=<acct> (fixed uildJobInfo to read j.Account).
+- New internal/cost package + pbs_cost CLI: apportions each node's real VM bill across
+  accounts by share of used core-seconds (handles shared + multi-node jobs and rolls idle/boot/drain
+  into the allocation; billed-but-empty nodes -> overhead). See docs/cloud-costing.md. Unit tests in
+  internal/cost/*_test.go; go test, go vet, and a live run on Azure sanitized accounting all pass.
+- **Still open:** per-project concurrent-running cap (job-level admission), routing jobs to
+  on-demand/spot/reserved pools as qos, and reconciling with Azure Cost Management via cost tags.
 
 ### 2.8 Multi-tenancy & quotas - layered on platform quota (cloud-native)  [GAP - lightweight scope]
 Do NOT reimplement hard resource limits - the **platform already enforces them** (Azure subscription
