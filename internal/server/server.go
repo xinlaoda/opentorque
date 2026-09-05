@@ -248,7 +248,9 @@ func (s *Server) buildJobInfo(j *job.Job) *acct.JobInfo {
 	if !j.CompTime.IsZero() {
 		info.EndTime = j.CompTime.Unix()
 	}
-	if v, ok := j.Attrs["Account_Name"]; ok {
+	if j.Account != "" {
+		info.Account = j.Account
+	} else if v, ok := j.Attrs["Account_Name"]; ok {
 		info.Account = v
 	}
 	return info

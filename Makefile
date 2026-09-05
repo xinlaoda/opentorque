@@ -5,7 +5,7 @@ LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 
 DAEMONS := pbs_server pbs_mom pbs_sched
 CLI_TOOLS := qsub qstat qdel qhold qrls pbsnodes qmgr qalter qrun qrerun qmove qorder qsig qmsg qstart qstop qenable qdisable qterm qselect qchkpt
-UTIL_TOOLS := tracejob pbsdsh momctl pbs_track printjob pbs_pam_check
+UTIL_TOOLS := tracejob pbsdsh momctl pbs_track printjob pbs_pam_check pbs_cost
 
 .PHONY: all server mom sched cli clean install test fmt vet packages packages-deb packages-rpm
 
