@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-12
+
 ### Added
 - **Cloud cost attribution / chargeback (TODO 2.7).** `-A account` is parsed by `qsub`, stored on
   the job (`Account_Name`), and written into accounting S/E records as `account=<acct>` (fixed

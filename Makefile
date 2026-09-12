@@ -1,6 +1,6 @@
 PREFIX ?= /usr/local
 GOFLAGS ?= -trimpath
-VERSION ?= 0.2.0
+VERSION ?= 0.3.0
 LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 
 DAEMONS := pbs_server pbs_mom pbs_sched
